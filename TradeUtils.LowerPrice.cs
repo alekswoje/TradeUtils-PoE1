@@ -32,6 +32,12 @@ public partial class TradeUtils
     private bool _lowerPriceTimerExpired = false;
     private WaveOutEvent _lowerPriceWaveOut;
     private bool _lowerPriceManualRepriceTriggered = false;
+    private bool _lowerPriceWasStashVisible = false;
+    private int _lowerPriceButtonRenderCount = 0;
+    private bool _lowerPriceImageLoaded = false;
+    private int _lowerPriceRenderCallCount = 0;
+    private DateTime _lowerPriceLastRenderLog = DateTime.MinValue;
+    private DateTime _lowerPriceLastPanelCheck = DateTime.MinValue;
     
     // Value display fields
     private readonly HttpClient _lowerPriceHttpClient = new HttpClient();
@@ -45,7 +51,40 @@ public partial class TradeUtils
     {
         try
         {
-            Graphics.InitImage(Path.Combine(DirectoryFullName, "images", "pick.png"), false);
+            var imagePath = Path.Combine(DirectoryFullName, "Images", "pick.png");
+            LogMessage($"LowerPrice DEBUG: Loading image from: {imagePath}");
+            LogMessage($"LowerPrice DEBUG: Image file exists? {File.Exists(imagePath)}");
+            
+            if (File.Exists(imagePath))
+            {
+                try
+                {
+                    // Try loading with just the filename (Graphics might expect relative path)
+                    Graphics.InitImage("pick.png", false);
+                    _lowerPriceImageLoaded = true;
+                    LogMessage("LowerPrice DEBUG: Image loaded successfully (using 'pick.png')");
+                }
+                catch (Exception ex)
+                {
+                    LogError($"LowerPrice DEBUG: Failed to load image: {ex.Message}");
+                    try
+                    {
+                        // Try with full path
+                        Graphics.InitImage(imagePath, false);
+                        _lowerPriceImageLoaded = true;
+                        LogMessage("LowerPrice DEBUG: Image loaded successfully (using full path)");
+                    }
+                    catch (Exception ex2)
+                    {
+                        LogError($"LowerPrice DEBUG: Failed to load image with full path: {ex2.Message}");
+                    }
+                }
+            }
+            else
+            {
+                LogError($"LowerPrice DEBUG: Image file not found at {imagePath}");
+                LogError($"LowerPrice DEBUG: Will use fallback colored box for button");
+            }
             
             // Initialize currency rates with default values
             InitializeLowerPriceDefaultCurrencyRates();
@@ -57,12 +96,29 @@ public partial class TradeUtils
         }
         catch (Exception ex)
         {
-            LogError($"Failed to initialize LowerPrice: {ex.Message}");
+            LogError($"Failed to initialize LowerPrice: {ex.Message}\nStackTrace: {ex.StackTrace}");
         }
     }
 
     partial void RenderLowerPrice()
     {
+        // Log that render is being called (once per second)
+        _lowerPriceRenderCallCount++;
+        if ((DateTime.Now - _lowerPriceLastRenderLog).TotalSeconds >= 1)
+        {
+            LogMessage($"LowerPrice DEBUG: Render called {_lowerPriceRenderCallCount} times in last second");
+            _lowerPriceRenderCallCount = 0;
+            _lowerPriceLastRenderLog = DateTime.Now;
+        }
+        
+        // This should ONLY be called if LowerPrice is enabled, but let's double-check
+        if (!LowerPriceSettings.Enable.Value)
+        {
+            LogError("LowerPrice DEBUG: RenderLowerPrice called but LowerPrice is DISABLED in settings!");
+            LogError("LowerPrice DEBUG: Enable it in: Plugin Settings > Trade Utils > Lower Price > Enable");
+            return;
+        }
+        
         try
         {
             // Check hotkeys first
@@ -80,22 +136,128 @@ public partial class TradeUtils
                 RenderLowerPriceValueDisplay();
             }
 
-            // Render stash panel button - POE1 uses StashElement instead of OfflineMerchantPanel
-            var stashElement = GameController.IngameState.IngameUi.StashElement;
-            if (stashElement != null && stashElement.IsVisible)
+            // Render button for offline merchant panel (hideout trading post)
+            var ingameState = GameController?.IngameState;
+            if (ingameState == null)
+            {
+                return; // Not in game yet
+            }
+            
+            var ingameUi = ingameState.IngameUi;
+            if (ingameUi == null)
+            {
+                return; // UI not ready
+            }
+            
+            // POE1: Use OfflineMerchantPanel for the hideout trading post
+            var offlineMerchantPanel = ingameUi.OfflineMerchantPanel;
+            
+            // Debug panel state (only log once per state change)
+            bool isPanelVisible = offlineMerchantPanel != null && offlineMerchantPanel.IsVisible;
+            if (isPanelVisible != _lowerPriceWasStashVisible)
+            {
+                LogMessage($"LowerPrice DEBUG: Panel visibility changed - OfflineMerchantPanel null? {offlineMerchantPanel == null}, IsVisible={isPanelVisible}");
+                if (isPanelVisible)
+                {
+                    LogMessage($"LowerPrice DEBUG: OfflineMerchantPanel address = {offlineMerchantPanel.Address:X}");
+                    LogMessage($"LowerPrice DEBUG: OfflineMerchantPanel IsVisible={offlineMerchantPanel.IsVisible}");
+                    
+                    try
+                    {
+                        // OfflineMerchantPanel is a StashElement, so we need to access VisibleStash first
+                        var visibleStash = offlineMerchantPanel.VisibleStash;
+                        LogMessage($"LowerPrice DEBUG: VisibleStash null? {visibleStash == null}");
+                        if (visibleStash != null)
+                        {
+                            var items = visibleStash.VisibleInventoryItems;
+                            LogMessage($"LowerPrice DEBUG: VisibleInventoryItems null? {items == null}");
+                            if (items != null)
+                            {
+                                LogMessage($"LowerPrice DEBUG: Item count = {items.Count()}");
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        LogError($"LowerPrice DEBUG: Error accessing OfflineMerchantPanel data: {ex.Message}");
+                    }
+                }
+                _lowerPriceWasStashVisible = isPanelVisible;
+            }
+            
+            // Draw a test marker to confirm rendering works
+            try
+            {
+                var testPos = new Vector2(200, 200);
+                Graphics.DrawText("LowerPrice Active", testPos, SharpDX.Color.Green);
+            }
+            catch (Exception ex)
+            {
+                LogError($"LowerPrice DEBUG: Failed to draw test text: {ex.Message}");
+            }
+            
+            if (offlineMerchantPanel != null && offlineMerchantPanel.IsVisible)
             {
                 const float buttonSize = 37;
                 var offset = new Vector2(10, 10);
-                var buttonPos = new Vector2(
-                    GameController.Window.GetWindowRectangleTimeCache.TopLeft.X,
-                    GameController.Window.GetWindowRectangleTimeCache.TopLeft.Y
-                ) + offset;
+                var windowTopLeft = GameController.Window.GetWindowRectangleTimeCache.TopLeft;
+                var buttonPos = new Vector2(windowTopLeft.X, windowTopLeft.Y) + offset;
                 var buttonRect = new RectangleF(buttonPos.X, buttonPos.Y, buttonSize, buttonSize);
-                Graphics.DrawImage("pick.png", buttonRect);
+                
+                // Debug button rendering on first render
+                if (_lowerPriceButtonRenderCount < 3)
+                {
+                    _lowerPriceButtonRenderCount++;
+                    LogMessage($"LowerPrice DEBUG: Rendering button - Pos=({buttonPos.X}, {buttonPos.Y}), Size={buttonSize}");
+                    LogMessage($"LowerPrice DEBUG: Window TopLeft=({windowTopLeft.X}, {windowTopLeft.Y})");
+                    LogMessage($"LowerPrice DEBUG: Image loaded? {_lowerPriceImageLoaded}");
+                }
+                
+                try
+                {
+                    if (_lowerPriceImageLoaded)
+                    {
+                        try
+                        {
+                            Graphics.DrawImage("pick.png", buttonRect);
+                            
+                            // Debug: Log once that we're drawing the image
+                            if (_lowerPriceButtonRenderCount == 1)
+                            {
+                                LogMessage($"LowerPrice DEBUG: Drawing image 'pick.png' successfully");
+                            }
+                        }
+                        catch (Exception imgEx)
+                        {
+                            LogError($"LowerPrice DEBUG: Failed to draw image, using fallback: {imgEx.Message}");
+                            // Fallback if image draw fails
+                            Graphics.DrawBox(buttonRect, new SharpDX.Color(100, 150, 255, 200));
+                            Graphics.DrawFrame(buttonRect, new SharpDX.Color(255, 255, 255, 255), 2);
+                            var textPos = new Vector2(buttonPos.X + 8, buttonPos.Y + 12);
+                            Graphics.DrawText("RP", textPos, new SharpDX.Color(255, 255, 255, 255));
+                            _lowerPriceImageLoaded = false; // Don't try again
+                        }
+                    }
+                    else
+                    {
+                        // Fallback: Draw a colored box with border
+                        Graphics.DrawBox(buttonRect, new SharpDX.Color(100, 150, 255, 200));
+                        Graphics.DrawFrame(buttonRect, new SharpDX.Color(255, 255, 255, 255), 2);
+                        // Draw text "RP" (Reprice) in center
+                        var textPos = new Vector2(buttonPos.X + 8, buttonPos.Y + 12);
+                        Graphics.DrawText("RP", textPos, new SharpDX.Color(255, 255, 255, 255));
+                    }
+                }
+                catch (Exception ex)
+                {
+                    LogError($"LowerPrice DEBUG: Failed to draw button: {ex.Message}");
+                }
 
                 // Check for button press or manual trigger
-                if (IsLowerPriceButtonPressed(buttonRect) || _lowerPriceManualRepriceTriggered)
+                var buttonPressed = IsLowerPriceButtonPressed(buttonRect);
+                if (buttonPressed || _lowerPriceManualRepriceTriggered)
                 {
+                    LogMessage($"LowerPrice DEBUG: Button pressed={buttonPressed}, ManualTrigger={_lowerPriceManualRepriceTriggered}");
                     _lowerPriceManualRepriceTriggered = false; // Reset manual trigger
                     _ = Task.Run(async () =>
                     {
@@ -103,7 +265,7 @@ public partial class TradeUtils
                         {
                             await Task.Delay(10);
                         }
-                        UpdateLowerPriceAllItemPrices(stashElement);
+                        UpdateLowerPriceAllItemPrices(offlineMerchantPanel);
                     });
                 }
             }
@@ -145,6 +307,7 @@ public partial class TradeUtils
             // Check manual reprice hotkey
             if (LowerPriceSettings.ManualRepriceHotkey.PressedOnce())
             {
+                LogMessage("LowerPrice DEBUG: Manual reprice hotkey pressed!");
                 _lowerPriceManualRepriceTriggered = true;
             }
         }
@@ -154,26 +317,74 @@ public partial class TradeUtils
         }
     }
 
-    private async void UpdateLowerPriceAllItemPrices(object stashElement)
+    private async void UpdateLowerPriceAllItemPrices(object offlineMerchantPanel)
     {
         try
         {
-            // POE1 uses StashElement instead of OfflineMerchantPanel
-            var stashPanel = GameController.IngameState.IngameUi.StashElement;
-            var visibleStash = stashPanel?.VisibleStash;
-            if (visibleStash == null || visibleStash.VisibleInventoryItems == null || !visibleStash.VisibleInventoryItems.Any()) return;
+            LogMessage("=== LowerPrice: Starting reprice operation ===");
+            
+            // POE1: Use OfflineMerchantPanel for offline merchant panel
+            var panel = GameController.IngameState.IngameUi.OfflineMerchantPanel;
+            
+            if (panel == null)
+            {
+                LogError("LowerPrice DEBUG: OfflineMerchantPanel is null");
+                return;
+            }
+            
+            if (!panel.IsVisible)
+            {
+                LogError("LowerPrice DEBUG: OfflineMerchantPanel is not visible");
+                return;
+            }
+            
+            // OfflineMerchantPanel is a StashElement, so we need to access VisibleStash first
+            var visibleStash = panel.VisibleStash;
+            if (visibleStash == null)
+            {
+                LogError("LowerPrice DEBUG: VisibleStash is null");
+                return;
+            }
+            
+            var items = visibleStash.VisibleInventoryItems;
+            
+            if (items == null)
+            {
+                LogError("LowerPrice DEBUG: VisibleInventoryItems is null");
+                return;
+            }
+            
+            var itemCount = items.Count();
+            LogMessage($"LowerPrice DEBUG: Found {itemCount} items in merchant panel");
+            
+            if (!items.Any())
+            {
+                LogMessage("LowerPrice DEBUG: No items to process");
+                return;
+            }
 
-            foreach (var item in visibleStash.VisibleInventoryItems)
+            int processedCount = 0;
+            int skippedLocked = 0;
+            int skippedNoPrice = 0;
+            int repriced = 0;
+            int pickedUp = 0;
+            bool structureDumped = false;  // Only dump structure once for first item
+            
+            foreach (var item in items)
             {
                 try
                 {
-                    if (!stashPanel.IsVisible || LowerPriceMoveCancellationRequested)
+                    processedCount++;
+                    
+                    if (!panel.IsVisible || LowerPriceMoveCancellationRequested)
                     {
+                        LogMessage($"LowerPrice DEBUG: Breaking - PanelVisible={panel.IsVisible}, CancelRequested={LowerPriceMoveCancellationRequested}");
                         break;
                     }
 
                     if (item.Children?.Count == 2)
                     {
+                        LogMessage($"LowerPrice DEBUG: Item {processedCount} - Skipping (has 2 children)");
                         await TaskUtils.NextFrame();
                         await Task.Delay(LowerPriceSettings.ActionDelay.Value + _lowerPriceRandom.Next(LowerPriceSettings.RandomDelay.Value));
                         continue;
@@ -185,6 +396,7 @@ public partial class TradeUtils
                                    new Vector2(GameController.Window.GetWindowRectangleTimeCache.TopLeft.X, 
                                              GameController.Window.GetWindowRectangleTimeCache.TopLeft.Y);
 
+                    LogMessage($"LowerPrice DEBUG: Item {processedCount} - Moving mouse to position ({position.X}, {position.Y})");
                     Utility.Mouse.moveMouse(position);
                     await TaskUtils.NextFrame();
                     await Task.Delay(LowerPriceSettings.ActionDelay.Value + _lowerPriceRandom.Next(LowerPriceSettings.RandomDelay.Value));
@@ -192,50 +404,80 @@ public partial class TradeUtils
                     // Check if item is locked before processing
                     if (IsLowerPriceItemLocked(item))
                     {
+                        LogMessage($"LowerPrice DEBUG: Item {processedCount} - Skipping (locked)");
+                        skippedLocked++;
                         await TaskUtils.NextFrame();
                         await Task.Delay(LowerPriceSettings.ActionDelay.Value + _lowerPriceRandom.Next(LowerPriceSettings.RandomDelay.Value));
                         continue;
                     }
 
                     var tooltip = item.Tooltip;
+                    LogMessage($"LowerPrice DEBUG: Item {processedCount} - Tooltip null? {tooltip == null}");
+                    
+                    // Dump tooltip structure for first item with tooltip
+                    if (tooltip != null && !structureDumped)
+                    {
+                        structureDumped = true;
+                        LogMessage($"LowerPrice DEBUG: === DUMPING TOOLTIP STRUCTURE FOR FIRST ITEM ===");
+                        DumpTooltipStructure(tooltip);
+                        LogMessage($"LowerPrice DEBUG: === END TOOLTIP STRUCTURE ===");
+                    }
+                    
                     if (tooltip != null && tooltip.Children.Count > 0)
                     {
+                        LogMessage($"LowerPrice DEBUG: Item {processedCount} - Tooltip.Children.Count = {tooltip.Children.Count}");
                         var tooltipChild0 = tooltip.Children[0];
                         if (tooltipChild0 != null && tooltipChild0.Children.Count > 1)
                         {
+                            LogMessage($"LowerPrice DEBUG: Item {processedCount} - Tooltip.Children[0].Children.Count = {tooltipChild0.Children.Count}");
                             var tooltipChild1 = tooltipChild0.Children[1];
                             if (tooltipChild1 != null && tooltipChild1.Children.Any())
                             {
+                                LogMessage($"LowerPrice DEBUG: Item {processedCount} - Tooltip.Children[0].Children[1].Children.Count = {tooltipChild1.Children.Count}");
                                 var lastChild = tooltipChild1.Children.Last();
+                                LogMessage($"LowerPrice DEBUG: Item {processedCount} - LastChild.Children.Count = {lastChild?.Children?.Count ?? -1}");
                                 if (lastChild != null && lastChild.Children.Count > 1)
                                 {
+                                    LogMessage($"LowerPrice DEBUG: Item {processedCount} - LastChild.Children[1] exists? {lastChild.Children.Count > 1}");
                                     var priceChild1 = lastChild.Children[1];
                                     if (priceChild1 != null && priceChild1.Children.Count > 0)
                                     {
+                                        LogMessage($"LowerPrice DEBUG: Item {processedCount} - PriceChild1.Children.Count = {priceChild1.Children.Count}");
                                         var priceChild0 = priceChild1.Children[0];
                                         if (priceChild0 != null)
                                         {
                                             string priceText = priceChild0.Text;
+                                            LogMessage($"LowerPrice DEBUG: Item {processedCount} - PriceText = '{priceText}'");
                                             if (priceText != null && priceText.EndsWith("x"))
                                             {
                                                 string priceStr = priceText.Replace("x", "").Replace(",", "").Trim();
+                                                LogMessage($"LowerPrice DEBUG: Item {processedCount} - Parsed priceStr = '{priceStr}'");
                                                 if (int.TryParse(priceStr, out int oldPrice))
                                                 {
                                                     string orbType = priceChild1.Children.Count > 2 ? priceChild1.Children[2].Text : null;
+                                                    LogMessage($"LowerPrice DEBUG: Item {processedCount} - OldPrice = {oldPrice}, OrbType = '{orbType}'");
                                                     bool reprice = false;
                                                     if (orbType == "Chaos Orb" && LowerPriceSettings.RepriceChaos.Value) reprice = true;
                                                     else if (orbType == "Divine Orb" && LowerPriceSettings.RepriceDivine.Value) reprice = true;
                                                     else if (orbType == "Exalted Orb" && LowerPriceSettings.RepriceExalted.Value) reprice = true;
                                                     else if (orbType == "Orb of Annulment" && LowerPriceSettings.RepriceAnnul.Value) reprice = true;
 
-                                                    if (!reprice) continue;
+                                                    LogMessage($"LowerPrice DEBUG: Item {processedCount} - Reprice = {reprice}");
+                                                    if (!reprice)
+                                                    {
+                                                        skippedNoPrice++;
+                                                        continue;
+                                                    }
 
                                                     float newPrice = CalculateLowerPriceNewPrice(oldPrice, orbType);
+                                                    LogMessage($"LowerPrice DEBUG: Item {processedCount} - Calculated newPrice = {newPrice}");
                                                     
                                                     if (oldPrice == 1)
                                                     {
+                                                        LogMessage($"LowerPrice DEBUG: Item {processedCount} - Price is 1, PickupItemsAtOne = {LowerPriceSettings.PickupItemsAtOne.Value}");
                                                         if (LowerPriceSettings.PickupItemsAtOne.Value)
                                                         {
+                                                            LogMessage($"LowerPrice DEBUG: Item {processedCount} - Picking up item");
                                                             Utility.Keyboard.KeyDown(Keys.LControlKey);
                                                             await TaskUtils.NextFrame();
                                                             await Task.Delay(LowerPriceSettings.ActionDelay.Value + _lowerPriceRandom.Next(LowerPriceSettings.RandomDelay.Value));
@@ -248,11 +490,13 @@ public partial class TradeUtils
                                                             Utility.Keyboard.KeyUp(Keys.LControlKey);
                                                             await TaskUtils.NextFrame();
                                                             await Task.Delay(LowerPriceSettings.ActionDelay.Value + _lowerPriceRandom.Next(LowerPriceSettings.RandomDelay.Value));
+                                                            pickedUp++;
                                                         }
                                                         continue;
                                                     }
 
                                                     if (newPrice < 1) newPrice = 1;
+                                                    LogMessage($"LowerPrice DEBUG: Item {processedCount} - Repricing from {oldPrice} to {newPrice}");
                                                     Utility.Mouse.RightDown();
                                                     await TaskUtils.NextFrame();
                                                     await Task.Delay(LowerPriceSettings.ActionDelay.Value + _lowerPriceRandom.Next(LowerPriceSettings.RandomDelay.Value));
@@ -265,6 +509,8 @@ public partial class TradeUtils
                                                     Utility.Keyboard.KeyPress(Keys.Enter);
                                                     await TaskUtils.NextFrame();
                                                     await Task.Delay(LowerPriceSettings.ActionDelay.Value + _lowerPriceRandom.Next(LowerPriceSettings.RandomDelay.Value));
+                                                    repriced++;
+                                                    LogMessage($"LowerPrice DEBUG: Item {processedCount} - Successfully repriced!");
                                                     
                                                     // Update last reprice time and reset timer
                                                     if (LowerPriceSettings.EnableTimer.Value)
@@ -273,12 +519,52 @@ public partial class TradeUtils
                                                         _lowerPriceTimerExpired = false;
                                                     }
                                                 }
+                                                else
+                                                {
+                                                    LogMessage($"LowerPrice DEBUG: Item {processedCount} - Failed to parse price as int");
+                                                    skippedNoPrice++;
+                                                }
+                                            }
+                                            else
+                                            {
+                                                LogMessage($"LowerPrice DEBUG: Item {processedCount} - PriceText doesn't end with 'x' or is null");
+                                                skippedNoPrice++;
                                             }
                                         }
+                                        else
+                                        {
+                                            LogMessage($"LowerPrice DEBUG: Item {processedCount} - priceChild0 is null");
+                                            skippedNoPrice++;
+                                        }
+                                    }
+                                    else
+                                    {
+                                        LogMessage($"LowerPrice DEBUG: Item {processedCount} - priceChild1 is null or has no children");
+                                        skippedNoPrice++;
                                     }
                                 }
+                                else
+                                {
+                                    LogMessage($"LowerPrice DEBUG: Item {processedCount} - lastChild is null or doesn't have >1 children");
+                                    skippedNoPrice++;
+                                }
+                            }
+                            else
+                            {
+                                LogMessage($"LowerPrice DEBUG: Item {processedCount} - tooltipChild1 is null or has no children");
+                                skippedNoPrice++;
                             }
                         }
+                        else
+                        {
+                            LogMessage($"LowerPrice DEBUG: Item {processedCount} - tooltipChild0 is null or doesn't have >1 children");
+                            skippedNoPrice++;
+                        }
+                    }
+                    else
+                    {
+                        LogMessage($"LowerPrice DEBUG: Item {processedCount} - Tooltip is null or has no children");
+                        skippedNoPrice++;
                     }
 
                     await TaskUtils.NextFrame();
@@ -287,15 +573,23 @@ public partial class TradeUtils
                 catch (Exception ex)
                 {
                     // Log error for individual item processing but continue with next item
-                    LogError($"Error processing item: {ex.Message}");
+                    LogError($"LowerPrice DEBUG: Error processing item {processedCount}: {ex.Message}\nStackTrace: {ex.StackTrace}");
                     continue;
                 }
             }
+            
+            // Log summary
+            LogMessage($"=== LowerPrice: Reprice operation complete ===");
+            LogMessage($"LowerPrice DEBUG: Total items processed: {processedCount}");
+            LogMessage($"LowerPrice DEBUG: Items locked: {skippedLocked}");
+            LogMessage($"LowerPrice DEBUG: Items without price: {skippedNoPrice}");
+            LogMessage($"LowerPrice DEBUG: Items repriced: {repriced}");
+            LogMessage($"LowerPrice DEBUG: Items picked up: {pickedUp}");
         }
         catch (Exception ex)
         {
             // Log error for the entire reprice operation
-            LogError($"Error in UpdateAllItemPrices: {ex.Message}");
+            LogError($"LowerPrice DEBUG: Error in UpdateAllItemPrices: {ex.Message}\nStackTrace: {ex.StackTrace}");
         }
     }
 
@@ -366,6 +660,52 @@ public partial class TradeUtils
         {
             LogError($"Error checking button press: {ex.Message}");
             return false;
+        }
+    }
+
+    private void DumpTooltipStructure(dynamic element, string prefix = "", int depth = 0, int maxDepth = 5)
+    {
+        try
+        {
+            if (element == null || depth > maxDepth) return;
+            
+            string text = "";
+            try { text = element.Text ?? ""; } catch { }
+            
+            string textureName = "";
+            try { textureName = element.TextureName ?? ""; } catch { }
+            
+            int childCount = 0;
+            try { childCount = element.Children?.Count ?? 0; } catch { }
+            
+            string info = $"{prefix}[{depth}] Children={childCount}";
+            if (!string.IsNullOrEmpty(text))
+                info += $", Text='{text}'";
+            if (!string.IsNullOrEmpty(textureName))
+                info += $", Texture='{textureName}'";
+            
+            LogMessage($"LowerPrice STRUCTURE: {info}");
+            
+            if (childCount > 0 && depth < maxDepth)
+            {
+                try
+                {
+                    int index = 0;
+                    foreach (var child in element.Children)
+                    {
+                        DumpTooltipStructure(child, $"{prefix}  [{index}]", depth + 1, maxDepth);
+                        index++;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    LogError($"LowerPrice STRUCTURE: Error iterating children at depth {depth}: {ex.Message}");
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            LogError($"LowerPrice STRUCTURE: Error dumping element at depth {depth}: {ex.Message}");
         }
     }
 
@@ -594,8 +934,8 @@ public partial class TradeUtils
     {
         try
         {
-            var stashElement = GameController.IngameState.IngameUi.StashElement;
-            if (stashElement?.IsVisible != true) 
+            var offlineMerchantPanel = GameController.IngameState.IngameUi.OfflineMerchantPanel;
+            if (offlineMerchantPanel?.IsVisible != true) 
             {
                 return;
             }
@@ -603,18 +943,25 @@ public partial class TradeUtils
             // Update currency rates in background
             _ = Task.Run(UpdateLowerPriceCurrencyRates);
 
-            var visibleStash = stashElement.VisibleStash;
-            if (visibleStash?.VisibleInventoryItems == null) 
+            // OfflineMerchantPanel is a StashElement, so we need to access VisibleStash first
+            var visibleStash = offlineMerchantPanel.VisibleStash;
+            if (visibleStash == null)
+            {
+                return;
+            }
+            
+            var items = visibleStash.VisibleInventoryItems;
+            if (items == null) 
             {
                 return;
             }
 
-            var itemValues = CalculateLowerPriceItemValues(visibleStash.VisibleInventoryItems);
+            var itemValues = CalculateLowerPriceItemValues(items);
             
             var pos = new Vector2(LowerPriceSettings.ValueDisplayX.Value, LowerPriceSettings.ValueDisplayY.Value);
             
             // Create value display text
-            var totalItemsInTab = visibleStash?.VisibleInventoryItems?.Count() ?? 0;
+            var totalItemsInTab = items?.Count() ?? 0;
             var displayText = $"Items in tab: {itemValues.ItemsWithPricing}/{totalItemsInTab}\n";
             displayText += $"Items for sale: {itemValues.TotalItems}\n";
             
@@ -631,10 +978,10 @@ public partial class TradeUtils
             displayText += $"Total in Exalts: {itemValues.TotalInExalted:F1}";
             
             // Warning if tooltip count doesn't match total items
-            if (visibleStash?.VisibleInventoryItems != null)
+            if (items != null)
             {
-                var itemsWithTooltips = visibleStash.VisibleInventoryItems.Where(i => i.Tooltip != null).Count();
-                var totalItems = visibleStash.VisibleInventoryItems.Count();
+                var itemsWithTooltips = items.Where(i => i.Tooltip != null).Count();
+                var totalItems = items.Count();
                 
                 if (itemsWithTooltips < totalItems)
                 {

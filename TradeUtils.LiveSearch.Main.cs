@@ -14,6 +14,16 @@ public partial class TradeUtils : BaseSettingsPlugin<TradeUtilsSettings>
     
     public override bool Initialise()
     {
+        LogMessage("=== TradeUtils Plugin Initialization Started ===");
+        LogMessage($"Plugin Enabled: {Settings.Enable.Value}");
+        
+        if (!Settings.Enable.Value)
+        {
+            LogMessage("⚠️  TradeUtils plugin is DISABLED!");
+            LogMessage("⚠️  Enable it in: Plugin Settings > Trade Utils > Enable");
+            return true; // Return true so plugin doesn't error out
+        }
+        
         // Set plugin instance reference in settings for GUI access
         Settings.LiveSearch.GroupsConfig.PluginInstance = this;
         Settings.BulkBuy.GroupsConfig.PluginInstance = this;
@@ -21,25 +31,41 @@ public partial class TradeUtils : BaseSettingsPlugin<TradeUtilsSettings>
         // Initialize LiveSearch sub-plugin if enabled
         if (Settings.LiveSearch.General.Enable.Value)
         {
+            LogMessage("Initializing LiveSearch...");
             InitializeLiveSearch();
+        }
+        else
+        {
+            LogMessage("LiveSearch is DISABLED - skipping initialization");
         }
         
         // Initialize LowerPrice sub-plugin if enabled
         if (Settings.LowerPrice.Enable.Value)
         {
+            LogMessage("Initializing LowerPrice...");
             InitializeLowerPrice();
+        }
+        else
+        {
+            LogMessage("LowerPrice is DISABLED - skipping initialization");
+            LogMessage("⚠️  To enable LowerPrice: Plugin Settings > Trade Utils > Lower Price > Enable");
         }
         
         // Initialize BulkBuy sub-plugin if enabled
         if (Settings.BulkBuy.Enable.Value)
         {
+            LogMessage("Initializing BulkBuy...");
             InitializeBulkBuy();
         }
+        else
+        {
+            LogMessage("BulkBuy is DISABLED - skipping initialization");
+        }
         
-        LogMessage("TradeUtils initialized successfully");
-        LogMessage($"LiveSearch: {(Settings.LiveSearch.General.Enable.Value ? "ENABLED" : "DISABLED")}");
-        LogMessage($"LowerPrice: {(Settings.LowerPrice.Enable.Value ? "ENABLED" : "DISABLED")}");
-        LogMessage($"BulkBuy: {(Settings.BulkBuy.Enable.Value ? "ENABLED" : "DISABLED")}");
+        LogMessage("=== TradeUtils initialized successfully ===");
+        LogMessage($"Status - LiveSearch: {(Settings.LiveSearch.General.Enable.Value ? "ENABLED ✓" : "DISABLED ✗")}");
+        LogMessage($"Status - LowerPrice: {(Settings.LowerPrice.Enable.Value ? "ENABLED ✓" : "DISABLED ✗")}");
+        LogMessage($"Status - BulkBuy: {(Settings.BulkBuy.Enable.Value ? "ENABLED ✓" : "DISABLED ✗")}");
         
         return true;
     }
