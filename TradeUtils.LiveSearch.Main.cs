@@ -29,7 +29,7 @@ public partial class TradeUtils : BaseSettingsPlugin<TradeUtilsSettings>
         Settings.BulkBuy.GroupsConfig.PluginInstance = this;
         
         // Initialize LiveSearch sub-plugin if enabled
-        if (Settings.LiveSearch.General.Enable.Value)
+        if (Settings.LiveSearch.Enable.Value)
         {
             LogMessage("Initializing LiveSearch...");
             InitializeLiveSearch();
@@ -63,7 +63,7 @@ public partial class TradeUtils : BaseSettingsPlugin<TradeUtilsSettings>
         }
         
         LogMessage("=== TradeUtils initialized successfully ===");
-        LogMessage($"Status - LiveSearch: {(Settings.LiveSearch.General.Enable.Value ? "ENABLED ✓" : "DISABLED ✗")}");
+        LogMessage($"Status - LiveSearch: {(Settings.LiveSearch.Enable.Value ? "ENABLED ✓" : "DISABLED ✗")}");
         LogMessage($"Status - LowerPrice: {(Settings.LowerPrice.Enable.Value ? "ENABLED ✓" : "DISABLED ✗")}");
         LogMessage($"Status - BulkBuy: {(Settings.BulkBuy.Enable.Value ? "ENABLED ✓" : "DISABLED ✗")}");
         
@@ -73,7 +73,7 @@ public partial class TradeUtils : BaseSettingsPlugin<TradeUtilsSettings>
     public override void AreaChange(AreaInstance area)
     {
         // Propagate area change to LiveSearch if enabled
-        if (Settings.LiveSearch.General.Enable.Value)
+        if (Settings.LiveSearch.Enable.Value)
         {
             AreaChangeLiveSearch(area);
         }
@@ -104,7 +104,7 @@ public partial class TradeUtils : BaseSettingsPlugin<TradeUtilsSettings>
         if (!Settings.Enable) return null;
 
         // Tick LiveSearch if enabled
-        if (Settings.LiveSearch.General.Enable.Value)
+        if (Settings.LiveSearch.Enable.Value)
         {
             TickLiveSearch();
         }
@@ -143,7 +143,7 @@ public partial class TradeUtils : BaseSettingsPlugin<TradeUtilsSettings>
     // Public method for opening all enabled searches in browser (called from settings UI)
     public void OpenAllEnabledSearchesInBrowser()
     {
-        if (Settings.LiveSearch.General.Enable.Value)
+        if (Settings.LiveSearch.Enable.Value)
         {
             OpenAllEnabledSearchesInBrowserInternal();
         }

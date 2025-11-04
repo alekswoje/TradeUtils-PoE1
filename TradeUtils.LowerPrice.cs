@@ -102,20 +102,9 @@ public partial class TradeUtils
 
     partial void RenderLowerPrice()
     {
-        // Log that render is being called (once per second)
-        _lowerPriceRenderCallCount++;
-        if ((DateTime.Now - _lowerPriceLastRenderLog).TotalSeconds >= 1)
-        {
-            LogMessage($"LowerPrice DEBUG: Render called {_lowerPriceRenderCallCount} times in last second");
-            _lowerPriceRenderCallCount = 0;
-            _lowerPriceLastRenderLog = DateTime.Now;
-        }
-        
-        // This should ONLY be called if LowerPrice is enabled, but let's double-check
+        // Ensure LowerPrice is enabled
         if (!LowerPriceSettings.Enable.Value)
         {
-            LogError("LowerPrice DEBUG: RenderLowerPrice called but LowerPrice is DISABLED in settings!");
-            LogError("LowerPrice DEBUG: Enable it in: Plugin Settings > Trade Utils > Lower Price > Enable");
             return;
         }
         
@@ -183,17 +172,6 @@ public partial class TradeUtils
                     }
                 }
                 _lowerPriceWasStashVisible = isPanelVisible;
-            }
-            
-            // Draw a test marker to confirm rendering works
-            try
-            {
-                var testPos = new Vector2(200, 200);
-                Graphics.DrawText("LowerPrice Active", testPos, SharpDX.Color.Green);
-            }
-            catch (Exception ex)
-            {
-                LogError($"LowerPrice DEBUG: Failed to draw test text: {ex.Message}");
             }
             
             if (offlineMerchantPanel != null && offlineMerchantPanel.IsVisible)

@@ -42,6 +42,9 @@ public class LiveSearchSubSettings
         GroupsConfig = new GroupsRenderer(this);
     }
 
+    // ===== ENABLE TOGGLE (at root level) =====
+    public ToggleNode Enable { get; set; } = new ToggleNode(true);
+
     // ===== SUBSECTIONS =====
     [Submenu(CollapsedByDefault = true)]
     public GeneralSettingsSubMenu General { get; set; }
@@ -415,8 +418,6 @@ public class GeneralSettingsSubMenu
         _parent = parent;
         SessionIdConfig = new SessionIdRenderer(parent);
     }
-
-    public ToggleNode Enable { get; set; } = new ToggleNode(true);
 
     public ToggleNode DebugMode { get; set; } = new ToggleNode(false);
 

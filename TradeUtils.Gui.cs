@@ -37,7 +37,7 @@ public partial class TradeUtils
         }
         
         // Render LiveSearch GUI if enabled
-        if (Settings.LiveSearch.General.Enable.Value)
+        if (Settings.LiveSearch.Enable.Value)
         {
             RenderLiveSearchGui();
         }
