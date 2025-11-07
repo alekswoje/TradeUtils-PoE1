@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Net;
 using System.Net.Http;
 using System.Numerics;
 using System.Threading;
@@ -16,8 +17,11 @@ public partial class TradeUtils
     private List<SearchListener> _listeners = new List<SearchListener>();
     private SearchListener _activeListener;
     
-    // HTTP client for API requests
-    private static readonly HttpClient _httpClient = new HttpClient();
+    // HTTP client for API requests with automatic decompression
+    private static readonly HttpClient _httpClient = new HttpClient(new System.Net.Http.HttpClientHandler 
+    { 
+        AutomaticDecompression = System.Net.DecompressionMethods.GZip | System.Net.DecompressionMethods.Deflate | System.Net.DecompressionMethods.Brotli 
+    });
     
     // Recent items tracking
     private Queue<RecentItem> _recentItems = new Queue<RecentItem>();
@@ -49,6 +53,7 @@ public partial class TradeUtils
     // Settings UI state
     private string _sessionIdBuffer = "";
     private bool _settingsUpdated = false;
+    private bool _lastHotkeyState = false;
     
     // Random number generator
     private static readonly Random _random = new Random();
@@ -56,6 +61,20 @@ public partial class TradeUtils
     // Emergency shutdown tracking
     private bool _emergencyShutdown = false;
     private int _globalConnectionAttempts = 0;
+    
+    // Fast mode state
+    private bool _fastModePending = false;
+    private (int x, int y) _fastModeCoords;
+    private DateTime _fastModeStartTime;
+    private int _fastModeClickCount = 0;
+    private bool _fastModeCtrlPressed = false;
+    private bool _fastModeInInitialPhase = true;
+    private DateTime _fastModeLastClickTime = DateTime.MinValue;
+    private int _fastModeRetryCount = 0;
+    
+    // Cached purchase window position for Fast Mode
+    private (float x, float y) _cachedPurchaseWindowTopLeft = (0, 0);
+    private bool _hasCachedPosition = false;
     
     // ==================== HELPER METHODS ====================
     
@@ -201,12 +220,43 @@ public partial class TradeUtils
     }
     
     /// <summary>
-    /// Queue items for processing (placeholder for future implementation)
+    /// Queue items for processing with burst protection
     /// </summary>
     protected void QueueItemsForProcessing(string[] itemIds, Action<string> logMessage, Action<string> logError, string sessionId, object listener)
     {
-        LogDebug($"Queued {itemIds.Length} items for processing");
-        // For now, just log them - full implementation would involve rate-limited processing
+        if (itemIds == null || itemIds.Length == 0)
+        {
+            LogDebug("QueueItemsForProcessing: No items to queue");
+            return;
+        }
+        
+        LogMessage($"📥 BURST QUEUE: Adding {itemIds.Length} items to processing queue");
+        
+        var searchListener = listener as SearchListener;
+        if (searchListener == null)
+        {
+            LogError("QueueItemsForProcessing: Invalid listener object");
+            return;
+        }
+        
+        // Add processing action to burst queue
+        lock (_burstLock)
+        {
+            // Check if queue is getting too large
+            if (_burstQueue.Count >= LiveSearchSettings.RateLimiting.BurstQueueSize.Value)
+            {
+                LogMessage($"⚠️  BURST QUEUE FULL: {_burstQueue.Count} items queued, skipping new items");
+                return;
+            }
+            
+            _burstQueue.Enqueue(() =>
+            {
+                LogDebug($"🔄 PROCESSING from burst queue: {itemIds.Length} items");
+                _ = searchListener.ProcessItemsImmediately(itemIds, logMessage, logError, sessionId);
+            });
+            
+            LogDebug($"📊 BURST QUEUE STATUS: {_burstQueue.Count} actions queued");
+        }
     }
     
     /// <summary>
@@ -230,6 +280,7 @@ public partial class TradeUtils
     
     // Virtual key codes
     private const byte VK_CONTROL = 0x11;
+    private const byte VK_SHIFT = 0x10;
     
     // Key event flags
     private const uint KEYEVENTF_KEYDOWN = 0x0000;

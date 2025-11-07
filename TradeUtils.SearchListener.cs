@@ -249,7 +249,11 @@ public partial class TradeUtils
 
         private async Task ReceiveMessagesAsync(Action<string> logMessage, Action<string> logError, string sessionId)
         {
+            logMessage($"📡 RECEIVE LOOP STARTED: Listening for websocket messages on {Config.SearchId.Value}");
+            
             var buffer = new byte[1024 * 4];
+            int messageCount = 0;
+            
             // CRITICAL: Add null checks to prevent crashes during cleanup
             while (WebSocket != null && WebSocket.State == WebSocketState.Open && Cts != null && !Cts.Token.IsCancellationRequested)
             {
@@ -261,6 +265,9 @@ public partial class TradeUtils
                     {
                         var bufferSegment = new ArraySegment<byte>(buffer);
                         result = await WebSocket.ReceiveAsync(bufferSegment, Cts.Token);
+                        
+                        logMessage($"📨 WEBSOCKET RECEIVE: MessageType={result.MessageType}, Count={result.Count}, EndOfMessage={result.EndOfMessage}");
+                        
                         if (result.MessageType == WebSocketMessageType.Close)
                         {
                             lock (_connectionLock)
@@ -274,22 +281,35 @@ public partial class TradeUtils
                         }
                         if (result.MessageType != WebSocketMessageType.Text)
                         {
+                            logMessage($"⚠️ SKIPPING: Non-text message type: {result.MessageType}");
                             continue;
                         }
                         memoryStream.Write(buffer, 0, result.Count);
                     } while (!result.EndOfMessage);
 
+                    messageCount++;
+                    logMessage($"📬 MESSAGE #{messageCount} RECEIVED: Size={memoryStream.Length} bytes");
+
                     memoryStream.Seek(0, SeekOrigin.Begin);
                     using (var reader = new StreamReader(memoryStream, Encoding.UTF8))
                     {
                         string fullMessage = await reader.ReadToEndAsync();
+                        logMessage($"📄 RAW MESSAGE CONTENT: {fullMessage.Substring(0, Math.Min(500, fullMessage.Length))}");
+                        
                         fullMessage = CleanMessage(fullMessage, logMessage, logError);
+                        logMessage($"🧹 CLEANED MESSAGE: {fullMessage.Substring(0, Math.Min(500, fullMessage.Length))}");
+                        
                         try
                         {
+                            logMessage($"🔄 CALLING ProcessMessage for search {Config.SearchId.Value}");
                             await ProcessMessage(fullMessage, logMessage, logError, sessionId);
+                            logMessage($"✅ ProcessMessage COMPLETED successfully");
                         }
                         catch (Exception pmEx)
                         {
+                            logError($"❌ ERROR in ProcessMessage: {pmEx.Message}");
+                            logError($"StackTrace: {pmEx.StackTrace}");
+                            
                             if (!IsBenignTransientError(pmEx.Message))
                             {
                                 LastErrorTime = DateTime.Now;
@@ -395,13 +415,45 @@ public partial class TradeUtils
         {
             try
             {
+                // Log raw message if debug mode is enabled
+                if (_parent.Settings.LiveSearch.General.DebugMode.Value)
+                {
+                    logMessage($"🔍 DEBUG: Raw websocket message received (length: {message?.Length ?? 0})");
+                    if (message?.Length < 500)
+                    {
+                        logMessage($"🔍 DEBUG: Message content: {message}");
+                    }
+                }
+                
                 string cleanMessage = CleanMessage(message, logMessage, logError);
 
                 try
                 {
                     var wsResponse = JsonConvert.DeserializeObject<WsResponse>(cleanMessage);
-                    if (wsResponse.New != null && wsResponse.New.Length > 0)
+                    
+                    if (_parent.Settings.LiveSearch.General.DebugMode.Value)
                     {
+                        logMessage($"🔍 DEBUG: Deserialized websocket response");
+                        logMessage($"  - New items: {wsResponse?.New?.Length ?? 0}");
+                        logMessage($"  - Result token: {(string.IsNullOrEmpty(wsResponse?.Result) ? "none" : "present (JWT)")}");
+                        logMessage($"  - Auth: {wsResponse?.Auth?.ToString() ?? "null"}");
+                    }
+                    
+                    // Handle authentication confirmation
+                    if (wsResponse.Auth == true)
+                    {
+                        logMessage($"✅ AUTHENTICATED: Search {Config.SearchId.Value} authenticated successfully");
+                    }
+                    
+                    // Handle item notifications (new format with JWT tokens)
+                    if (!string.IsNullOrEmpty(wsResponse.Result))
+                    {
+                        logMessage($"📬 NEW ITEM (JWT): Received fetch token for search {Config.SearchId.Value}");
+                        logMessage($"🔑 Token preview: {wsResponse.Result.Substring(0, Math.Min(50, wsResponse.Result.Length))}...");
+                        
+                        // The Result field contains a JWT fetch token - treat it as a single item ID
+                        var itemIds = new string[] { wsResponse.Result };
+                        
                         // Ensure rate limiter is initialized
                         if (_parent._rateLimiter == null)
                         {
@@ -411,29 +463,76 @@ public partial class TradeUtils
                         // BURST PROTECTION: Queue items instead of processing immediately
                         if (_parent.Settings.LiveSearch.RateLimiting.BurstProtection.Value)
                         {
+                            logMessage($"🔄 BURST PROTECTION ENABLED: Queueing fetch token");
+                            _parent.QueueItemsForProcessing(itemIds, logMessage, logError, sessionId, this);
+                        }
+                        else
+                        {
+                            logMessage($"⚡ IMMEDIATE PROCESSING: Processing fetch token immediately");
+                            ProcessItemsImmediately(itemIds, logMessage, logError, sessionId);
+                        }
+                    }
+                    // Handle legacy format with item IDs array
+                    else if (wsResponse.New != null && wsResponse.New.Length > 0)
+                    {
+                        logMessage($"📬 NEW ITEMS (Legacy): Received {wsResponse.New.Length} new item(s) from search {Config.SearchId.Value}");
+                        
+                        // Log the item IDs
+                        if (_parent.Settings.LiveSearch.General.DebugMode.Value)
+                        {
+                            for (int i = 0; i < Math.Min(wsResponse.New.Length, 5); i++)
+                            {
+                                logMessage($"  Item {i + 1}: {wsResponse.New[i]}");
+                            }
+                            if (wsResponse.New.Length > 5)
+                            {
+                                logMessage($"  ... and {wsResponse.New.Length - 5} more");
+                            }
+                        }
+                        
+                        // Ensure rate limiter is initialized
+                        if (_parent._rateLimiter == null)
+                        {
+                            _parent._rateLimiter = new QuotaGuard(_parent.LogMessage, _parent.LogError, () => _parent.LiveSearchSettings);
+                        }
+
+                        // BURST PROTECTION: Queue items instead of processing immediately
+                        if (_parent.Settings.LiveSearch.RateLimiting.BurstProtection.Value)
+                        {
+                            logMessage($"🔄 BURST PROTECTION ENABLED: Queueing {wsResponse.New.Length} items");
                             _parent.QueueItemsForProcessing(wsResponse.New, logMessage, logError, sessionId, this);
                         }
                         else
                         {
+                            logMessage($"⚡ IMMEDIATE PROCESSING: Processing {wsResponse.New.Length} items immediately");
                             // Original immediate processing (for backward compatibility)
                             ProcessItemsImmediately(wsResponse.New, logMessage, logError, sessionId);
+                        }
+                    }
+                    else
+                    {
+                        if (_parent.Settings.LiveSearch.General.DebugMode.Value)
+                        {
+                            logMessage($"🔍 DEBUG: Websocket message received but no items (might be heartbeat or other message type)");
                         }
                     }
                 }
                 catch (JsonException parseEx)
                 {
-                    logError($"JSON parsing failed: {parseEx.Message}");
+                    logError($"❌ JSON parsing failed: {parseEx.Message}");
+                    logError($"Message was: {cleanMessage?.Substring(0, Math.Min(200, cleanMessage?.Length ?? 0))}");
                     LastErrorTime = DateTime.Now;
                 }
             } // End of outer try block
             catch (JsonException jsonEx)
             {
-                logError($"JSON parsing failed: {jsonEx.Message}");
+                logError($"❌ JSON parsing failed (outer): {jsonEx.Message}");
                 LastErrorTime = DateTime.Now;
             }
             catch (Exception ex)
             {
-                logError($"Processing failed: {ex.Message}");
+                logError($"❌ Processing failed: {ex.Message}");
+                logError($"StackTrace: {ex.StackTrace}");
                 LastErrorTime = DateTime.Now;
             }
         }
@@ -571,7 +670,27 @@ public partial class TradeUtils
                         if (response.IsSuccessStatusCode)
                         {
                             string content = await response.Content.ReadAsStringAsync();
-                            var itemResponse = JsonConvert.DeserializeObject<ItemFetchResponse>(content);
+                            
+                            logMessage($"📄 RESPONSE CONTENT (length: {content?.Length ?? 0}): {content?.Substring(0, Math.Min(500, content?.Length ?? 0))}");
+                            
+                            if (string.IsNullOrWhiteSpace(content))
+                            {
+                                logError($"❌ BATCH {batchNumber} ERROR: Response content is empty!");
+                                continue;
+                            }
+                            
+                            ItemFetchResponse itemResponse;
+                            try
+                            {
+                                itemResponse = JsonConvert.DeserializeObject<ItemFetchResponse>(content);
+                            }
+                            catch (JsonException jsonEx)
+                            {
+                                logError($"❌ BATCH {batchNumber} JSON PARSE ERROR: {jsonEx.Message}");
+                                logError($"Content was: {content}");
+                                continue;
+                            }
+                            
                             if (itemResponse.Result != null && itemResponse.Result.Any())
                             {
                                 logMessage($"✅ BATCH {batchNumber} SUCCESS: Received {itemResponse.Result.Length} items from batch");
@@ -640,23 +759,27 @@ public partial class TradeUtils
                                             }
 
                                             var candidatePaths = new List<string>();
+                                            
+                                            // PRIORITY 1: Use plugin's DirectoryFullName (same as LowerPrice uses)
+                                            var pluginDir = _parent.DirectoryFullName;
+                                            if (!string.IsNullOrEmpty(pluginDir))
+                                            {
+                                                candidatePaths.Add(Path.Combine(pluginDir, "sound", soundFileName));
+                                                logMessage($"🔍 SOUND: Plugin directory path: {Path.Combine(pluginDir, "sound", soundFileName)}");
+                                            }
+                                            
+                                            // PRIORITY 2: Assembly location based paths
                                             if (!string.IsNullOrEmpty(assemblyDir))
                                             {
                                                 candidatePaths.Add(Path.Combine(assemblyDir, "sound", soundFileName));
                                                 candidatePaths.Add(Path.Combine(assemblyDir, "..", "sound", soundFileName));
                                                 candidatePaths.Add(Path.Combine(assemblyDir, "..", "..", "sound", soundFileName));
-                                                candidatePaths.Add(Path.Combine(assemblyDir, "..", "..", "..", "Source", "LiveSearch", "sound", soundFileName));
-                                                var replaced = assemblyDir.Replace("Temp", "Source");
-                                                if (!string.Equals(replaced, assemblyDir, StringComparison.OrdinalIgnoreCase))
-                                                {
-                                                    candidatePaths.Add(Path.Combine(replaced, "sound", soundFileName));
-                                                }
-                                                candidatePaths.Add(Path.Combine(assemblyDir, "..", "..", "Source", "LiveSearch", "sound", soundFileName));
                                             }
+                                            
+                                            // PRIORITY 3: Other fallback paths
                                             candidatePaths.Add(Path.Combine("sound", soundFileName));
                                             candidatePaths.Add(Path.Combine(AppDomain.CurrentDomain.BaseDirectory ?? string.Empty, "sound", soundFileName));
                                             candidatePaths.Add(Path.Combine(Directory.GetCurrentDirectory(), "sound", soundFileName));
-                                            candidatePaths.Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Desktop), "ExileCore", "Plugins", "Source", "LiveSearch", "sound", soundFileName));
                                             string soundPath = null;
                                             foreach (var path in candidatePaths)
                                             {
@@ -702,7 +825,8 @@ public partial class TradeUtils
                                         if (!_parent._tpLocked)
                                         {
                                             _parent.TravelToHideout();
-                                            _parent._recentItems.Clear();
+                                            // Don't clear recent items - let them queue up
+                                            // _parent._recentItems.Clear(); // REMOVED: This was preventing multiple items from being processed
                                             _parent._lastTpTime = DateTime.Now;
                                             logMessage("Auto TP executed due to new search result.");
                                         }
@@ -711,6 +835,12 @@ public partial class TradeUtils
                                             double remainingTime = 10 - (DateTime.Now - _parent._tpLockedTime).TotalSeconds;
                                             logMessage($"Auto TP skipped: TP locked, waiting for window or timeout ({Math.Max(0, remainingTime):F1}s remaining)");
                                         }
+                                    }
+                                    // If already in hideout, trigger fast mode directly (no area change will occur)
+                                    else if (_parent.Settings.LiveSearch.FastMode.FastMode.Value && _parent.GameController.Area.CurrentArea.IsHideout)
+                                    {
+                                        logMessage($"🚀 FAST MODE: Already in hideout, triggering fast mode for item at ({x}, {y})");
+                                        _parent.TriggerFastMode(x, y);
                                     }
                                     // REMOVED: Mouse movement should only happen after manual teleports, not when auto TP is blocked by cooldown
                                 }

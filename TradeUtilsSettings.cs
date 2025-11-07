@@ -43,6 +43,7 @@ public class LiveSearchSubSettings
     }
 
     // ===== ENABLE TOGGLE (at root level) =====
+    [Menu("Enable Live Search", "Enable or disable the Live Search sub-plugin")]
     public ToggleNode Enable { get; set; } = new ToggleNode(true);
 
     // ===== SUBSECTIONS =====

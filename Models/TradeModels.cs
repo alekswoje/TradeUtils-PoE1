@@ -8,6 +8,12 @@ public class WsResponse
 {
     [JsonProperty("new")]
     public string[] New { get; set; }
+    
+    [JsonProperty("result")]
+    public string Result { get; set; }
+    
+    [JsonProperty("auth")]
+    public bool? Auth { get; set; }
 }
 
 public class ItemFetchResponse
