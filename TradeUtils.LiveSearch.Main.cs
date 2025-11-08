@@ -6,11 +6,12 @@ namespace TradeUtils;
 
 public partial class TradeUtils : BaseSettingsPlugin<TradeUtilsSettings>
 {
-    // Wrapper properties to allow LiveSearch/LowerPrice/BulkBuy code to access Settings directly
+    // Wrapper properties to allow LiveSearch/LowerPrice/BulkBuy/CurrencyExchange code to access Settings directly
     // This avoids having to change thousands of Settings.X references to Settings.LiveSearch.X
     private LiveSearchSubSettings LiveSearchSettings => Settings.LiveSearch;
     private LowerPriceSubSettings LowerPriceSettings => Settings.LowerPrice;
     private BulkBuySubSettings BulkBuySettings => Settings.BulkBuy;
+    private CurrencyExchangeSubSettings CurrencyExchangeSettings => Settings.CurrencyExchange;
     
     public override bool Initialise()
     {
@@ -62,10 +63,22 @@ public partial class TradeUtils : BaseSettingsPlugin<TradeUtilsSettings>
             LogMessage("BulkBuy is DISABLED - skipping initialization");
         }
         
+        // Initialize Currency Exchange sub-plugin if enabled
+        if (Settings.CurrencyExchange.Enable.Value)
+        {
+            LogMessage("Initializing Currency Exchange...");
+            InitializeCurrencyExchange();
+        }
+        else
+        {
+            LogMessage("Currency Exchange is DISABLED - skipping initialization");
+        }
+        
         LogMessage("=== TradeUtils initialized successfully ===");
         LogMessage($"Status - LiveSearch: {(Settings.LiveSearch.Enable.Value ? "ENABLED ✓" : "DISABLED ✗")}");
         LogMessage($"Status - LowerPrice: {(Settings.LowerPrice.Enable.Value ? "ENABLED ✓" : "DISABLED ✗")}");
         LogMessage($"Status - BulkBuy: {(Settings.BulkBuy.Enable.Value ? "ENABLED ✓" : "DISABLED ✗")}");
+        LogMessage($"Status - Currency Exchange: {(Settings.CurrencyExchange.Enable.Value ? "ENABLED ✓" : "DISABLED ✗")}");
         
         return true;
     }
@@ -89,6 +102,12 @@ public partial class TradeUtils : BaseSettingsPlugin<TradeUtilsSettings>
         {
             AreaChangeBulkBuy(area);
         }
+        
+        // Propagate area change to Currency Exchange if needed
+        if (Settings.CurrencyExchange.Enable.Value)
+        {
+            AreaChangeCurrencyExchange(area);
+        }
     }
 
     public override void Dispose()
@@ -96,6 +115,7 @@ public partial class TradeUtils : BaseSettingsPlugin<TradeUtilsSettings>
         DisposeLiveSearch();
         DisposeLowerPrice();
         DisposeBulkBuy();
+        DisposeCurrencyExchange();
         base.Dispose();
     }
 
@@ -120,6 +140,12 @@ public partial class TradeUtils : BaseSettingsPlugin<TradeUtilsSettings>
         {
             TickBulkBuy();
         }
+        
+        // Tick Currency Exchange if enabled
+        if (Settings.CurrencyExchange.Enable.Value)
+        {
+            TickCurrencyExchange();
+        }
 
         return null;
     }
@@ -128,17 +154,22 @@ public partial class TradeUtils : BaseSettingsPlugin<TradeUtilsSettings>
     partial void InitializeLiveSearch();
     partial void InitializeLowerPrice();
     partial void InitializeBulkBuy();
+    partial void InitializeCurrencyExchange();
     partial void RenderLowerPrice();
     partial void RenderBulkBuy();
+    partial void RenderCurrencyExchange();
     partial void AreaChangeLiveSearch(AreaInstance area);
     partial void AreaChangeLowerPrice(AreaInstance area);
     partial void AreaChangeBulkBuy(AreaInstance area);
+    partial void AreaChangeCurrencyExchange(AreaInstance area);
     partial void DisposeLiveSearch();
     partial void DisposeLowerPrice();
     partial void DisposeBulkBuy();
+    partial void DisposeCurrencyExchange();
     partial void TickLiveSearch();
     partial void TickLowerPrice();
     partial void TickBulkBuy();
+    partial void TickCurrencyExchange();
     
     // Public method for opening all enabled searches in browser (called from settings UI)
     public void OpenAllEnabledSearchesInBrowser()

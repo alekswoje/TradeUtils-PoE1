@@ -281,6 +281,7 @@ public partial class TradeUtils
     // Virtual key codes
     private const byte VK_CONTROL = 0x11;
     private const byte VK_SHIFT = 0x10;
+    private const byte VK_ALT = 0x12;
     
     // Key event flags
     private const uint KEYEVENTF_KEYDOWN = 0x0000;

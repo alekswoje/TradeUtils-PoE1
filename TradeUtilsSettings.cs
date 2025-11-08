@@ -18,6 +18,7 @@ public class TradeUtilsSettings : ISettings
         LiveSearch = new LiveSearchSubSettings();
         LowerPrice = new LowerPriceSubSettings();
         BulkBuy = new BulkBuySubSettings();
+        CurrencyExchange = new CurrencyExchangeSubSettings();
     }
 
     public ToggleNode Enable { get; set; } = new ToggleNode(true);
@@ -30,6 +31,9 @@ public class TradeUtilsSettings : ISettings
     
     [Menu("Bulk Buy Settings")]
     public BulkBuySubSettings BulkBuy { get; set; }
+    
+    [Menu("Currency Exchange Settings")]
+    public CurrencyExchangeSubSettings CurrencyExchange { get; set; }
 }
 
 // ==================== LIVESEARCH SUB-PLUGIN SETTINGS ====================
@@ -1219,4 +1223,104 @@ public class BulkBuyGroupsRenderer
         }
         HelpMarker("Add a new group to organize your bulk buy searches");
     }
+}
+
+// ==================== CURRENCY EXCHANGE SUB-PLUGIN SETTINGS ====================
+[Submenu(CollapsedByDefault = true)]
+public class CurrencyExchangeSubSettings
+{
+    public CurrencyExchangeSubSettings()
+    {
+        General = new CeGeneralSubMenu(this);
+        PricingStrategy = new CePricingStrategySubMenu(this);
+        AutoFill = new CeAutoFillSubMenu(this);
+    }
+
+    // ===== MAIN SETTINGS =====
+    [Menu("Enable Currency Exchange", "Enable or disable the Currency Exchange sub-plugin")]
+    public ToggleNode Enable { get; set; } = new ToggleNode(false);
+
+    [Menu("Debug Mode", "Enable detailed logging for debugging")]
+    [IgnoreMenu]
+    public ToggleNode DebugMode { get; set; } = new ToggleNode(false);
+
+    [Menu("Show Button", "Display the auto-fill button above input field")]
+    [IgnoreMenu]
+    public ToggleNode ShowButton { get; set; } = new ToggleNode(true);
+
+    // ===== PRICING STRATEGY =====
+    [Menu("Auto Undercut", "Automatically undercut the lowest maker order")]
+    [IgnoreMenu]
+    public ToggleNode AutoUndercut { get; set; } = new ToggleNode(true);
+
+    [Menu("Undercut Amount", "Amount to undercut by (e.g., 0.01 for 1/100 ratio)")]
+    [IgnoreMenu]
+    public RangeNode<float> UndercutAmount { get; set; } = new RangeNode<float>(0.01f, 0.001f, 0.1f);
+
+
+    // ===== AUTO FILL SETTINGS =====
+    [Menu("Fill Offered Amount", "Automatically fill the 'I Have' amount with total inventory stock")]
+    [IgnoreMenu]
+    public ToggleNode FillOfferedAmount { get; set; } = new ToggleNode(true);
+
+    [Menu("Fill Wanted Amount", "Automatically calculate the 'I Want' amount based on best ratio")]
+    [IgnoreMenu]
+    public ToggleNode FillWantedAmount { get; set; } = new ToggleNode(true);
+
+    [Menu("Auto Click Place Order", "Automatically click 'Place Order' button after filling")]
+    [IgnoreMenu]
+    public ToggleNode AutoClickPlaceOrder { get; set; } = new ToggleNode(false);
+
+    // ===== ACTION TIMING =====
+    [Menu("Action Delay (ms)", "Delay between actions to simulate human behavior")]
+    [IgnoreMenu]
+    public RangeNode<int> ActionDelay { get; set; } = new RangeNode<int>(75, 10, 500);
+
+    [Menu("Random Delay (ms)", "Random delay added to action delay")]
+    [IgnoreMenu]
+    public RangeNode<int> RandomDelay { get; set; } = new RangeNode<int>(25, 0, 100);
+
+    // ===== INVENTORY SCANNING =====
+    [Menu("Include Stash Tabs", "Include stash tabs when counting inventory")]
+    [IgnoreMenu]
+    public ToggleNode IncludeStashTabs { get; set; } = new ToggleNode(true);
+
+    [Menu("Include Currency Tab", "Include currency stash tab")]
+    [IgnoreMenu]
+    public ToggleNode IncludeCurrencyTab { get; set; } = new ToggleNode(true);
+
+    // Grouped submenu properties
+    [Submenu(CollapsedByDefault = true)] public CeGeneralSubMenu General { get; set; }
+    [Submenu(CollapsedByDefault = true)] public CePricingStrategySubMenu PricingStrategy { get; set; }
+    [Submenu(CollapsedByDefault = true)] public CeAutoFillSubMenu AutoFill { get; set; }
+}
+
+// ===== CURRENCY EXCHANGE SUBMENU CLASSES =====
+public class CeGeneralSubMenu
+{
+    private readonly CurrencyExchangeSubSettings _p;
+    public CeGeneralSubMenu(CurrencyExchangeSubSettings p) { _p = p; }
+    [Menu("Debug Mode")] public ToggleNode DebugMode => _p.DebugMode;
+    [Menu("Show Button")] public ToggleNode ShowButton => _p.ShowButton;
+}
+
+public class CePricingStrategySubMenu
+{
+    private readonly CurrencyExchangeSubSettings _p;
+    public CePricingStrategySubMenu(CurrencyExchangeSubSettings p) { _p = p; }
+    [Menu("Auto Undercut")] public ToggleNode AutoUndercut => _p.AutoUndercut;
+    [Menu("Undercut Amount")] public RangeNode<float> UndercutAmount => _p.UndercutAmount;
+}
+
+public class CeAutoFillSubMenu
+{
+    private readonly CurrencyExchangeSubSettings _p;
+    public CeAutoFillSubMenu(CurrencyExchangeSubSettings p) { _p = p; }
+    [Menu("Fill Offered Amount")] public ToggleNode FillOfferedAmount => _p.FillOfferedAmount;
+    [Menu("Fill Wanted Amount")] public ToggleNode FillWantedAmount => _p.FillWantedAmount;
+    [Menu("Auto Click Place Order")] public ToggleNode AutoClickPlaceOrder => _p.AutoClickPlaceOrder;
+    [Menu("Action Delay (ms)")] public RangeNode<int> ActionDelay => _p.ActionDelay;
+    [Menu("Random Delay (ms)")] public RangeNode<int> RandomDelay => _p.RandomDelay;
+    [Menu("Include Stash Tabs")] public ToggleNode IncludeStashTabs => _p.IncludeStashTabs;
+    [Menu("Include Currency Tab")] public ToggleNode IncludeCurrencyTab => _p.IncludeCurrencyTab;
 }

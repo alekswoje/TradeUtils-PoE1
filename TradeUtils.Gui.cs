@@ -53,6 +53,12 @@ public partial class TradeUtils
         {
             RenderBulkBuy();
         }
+        
+        // Render Currency Exchange if enabled
+        if (Settings.CurrencyExchange.Enable.Value)
+        {
+            RenderCurrencyExchange();
+        }
     }
     
     private void RenderLiveSearchGui()
