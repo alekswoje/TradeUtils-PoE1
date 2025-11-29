@@ -88,6 +88,10 @@ public partial class TradeUtils
     // LiveSearch started state (only start listeners when explicitly started via GUI)
     private bool _liveSearchStarted = false;
     
+    // Auto-stash pause tracking (tracks if BulkBuy/LiveSearch were paused by auto-stash)
+    private bool _bulkBuyPausedForStash = false;
+    private bool _liveSearchPausedForStash = false;
+    
     // ==================== HELPER METHODS ====================
     
     /// <summary>

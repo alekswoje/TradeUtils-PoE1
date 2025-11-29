@@ -422,6 +422,29 @@ public partial class TradeUtils
                     {
                         ImGui.Text($"Rate Limit: {_rateLimiter.GetStatus()}");
                     }
+                    
+                    ImGui.Spacing();
+                    ImGui.Separator();
+                    ImGui.Spacing();
+                    
+                    // Stash button
+                    if (ImGui.Button("Stash", new Vector2(100, 30)))
+                    {
+                        if (!_autoStashInProgress)
+                        {
+                            _ = StartAutoStashAsync();
+                        }
+                    }
+                    if (ImGui.IsItemHovered())
+                    {
+                        ImGui.SetTooltip("Auto-stash: Goes to hideout, opens stash, and stashes all inventory items");
+                    }
+                    
+                    if (_autoStashInProgress)
+                    {
+                        ImGui.SameLine();
+                        ImGui.TextColored(new Vector4(0.0f, 1.0f, 0.0f, 1.0f), "Stashing...");
+                    }
                 }
 
                 ImGui.End();

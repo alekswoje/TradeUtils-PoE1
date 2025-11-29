@@ -127,6 +127,24 @@ public partial class TradeUtils
     {
         try
         {
+            // Check if auto-stash is in progress - pause LiveSearch
+            if (_autoStashInProgress)
+            {
+                if (!_liveSearchPausedForStash)
+                {
+                    LogMessage("LiveSearch: Auto-stash in progress, pausing...");
+                    _liveSearchPausedForStash = true;
+                    _liveSearchPaused = true;
+                }
+                return;
+            }
+            else if (_liveSearchPausedForStash)
+            {
+                LogMessage("LiveSearch: Auto-stash completed, resuming...");
+                _liveSearchPausedForStash = false;
+                _liveSearchPaused = false;
+            }
+
             if (_liveSearchPaused)
             {
                 return;

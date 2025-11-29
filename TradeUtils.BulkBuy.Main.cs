@@ -935,6 +935,9 @@ public partial class TradeUtils
                     {
                         _totalSpent += listing.Price.Amount;
                     }
+                    
+                    // Check if inventory is full (can't fit 2x4 item) and trigger auto-stash (blocks until complete)
+                    await CheckAndTriggerAutoStashAsync();
                 }
                 else
                 {
