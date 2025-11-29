@@ -126,11 +126,26 @@ public partial class TradeUtils
     /// <summary>
     /// Trigger fast mode for given coordinates
     /// </summary>
-    public void TriggerFastMode(int x, int y)
+    public void TriggerFastMode(int x, int y, string searchId = null)
     {
-        if (!Settings.LiveSearch.FastMode.FastMode.Value)
+        bool fastModeEnabled = false;
+        
+        if (!string.IsNullOrEmpty(searchId))
         {
-            LogDebug("Fast Mode is disabled in settings");
+            var searchConfig = GetSearchConfigBySearchId(searchId);
+            if (searchConfig != null)
+            {
+                fastModeEnabled = searchConfig.FastMode.Value;
+            }
+        }
+        else
+        {
+            fastModeEnabled = Settings.LiveSearch.FastMode.FastMode.Value;
+        }
+        
+        if (!fastModeEnabled)
+        {
+            LogDebug("Fast Mode is disabled for this search");
             return;
         }
         

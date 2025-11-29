@@ -10,7 +10,8 @@ public partial class TradeUtils
 {
     private void RenderBulkBuyGui()
     {
-        if (!Settings.BulkBuy.ShowGui.Value) return;
+        // Always show GUI when BulkBuy is enabled
+        if (!Settings.BulkBuy.Enable.Value) return;
 
         try
         {
@@ -18,11 +19,21 @@ public partial class TradeUtils
             ImGui.SetNextWindowPos(Settings.BulkBuy.WindowPosition, ImGuiCond.FirstUseEver);
             ImGui.SetNextWindowSize(new Vector2(500, 400), ImGuiCond.FirstUseEver);
 
-            bool showGui = Settings.BulkBuy.ShowGui.Value;
+            bool showGui = true; // Always show when enabled
             if (ImGui.Begin("TradeUtils - Bulk Buy", ref showGui, 
                 ImGuiWindowFlags.AlwaysAutoResize | ImGuiWindowFlags.NoCollapse))
             {
-                Settings.BulkBuy.ShowGui.Value = showGui;
+                // If window was closed (showGui became false), disable BulkBuy
+                if (!showGui)
+                {
+                    if (_bulkBuyInProgress)
+                    {
+                        StopBulkBuy();
+                    }
+                    Settings.BulkBuy.Enable.Value = false;
+                    ImGui.End();
+                    return;
+                }
                 
                 // Save window position
                 Settings.BulkBuy.WindowPosition = ImGui.GetWindowPos();
@@ -39,7 +50,8 @@ public partial class TradeUtils
                     {
                         StopBulkBuy();
                     }
-                    Settings.BulkBuy.ShowGui.Value = false;
+                    // Closing the GUI disables the BulkBuy sub-plugin
+                    Settings.BulkBuy.Enable.Value = false;
                 }
 
                 ImGui.Spacing();

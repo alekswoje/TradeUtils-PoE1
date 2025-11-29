@@ -812,6 +812,16 @@ public partial class TradeUtils
                                             LastErrorTime = DateTime.Now;
                                         }
                                     }
+                                    // Update stats
+                                    _parent.Settings.LiveSearch.TotalItemsProcessed++;
+                                    
+                                    // Check if paused - if so, don't process items (but keep websocket open)
+                                    if (_parent._liveSearchPaused)
+                                    {
+                                        logMessage("LiveSearch: Paused - item queued but not processing");
+                                        return;
+                                    }
+                                    
                                     if (_parent.Settings.LiveSearch.AutoFeatures.AutoTp.Value && _parent.GameController.Area.CurrentArea.IsHideout && !_parent._autoTpPaused)
                                     {
                                         // Check if TP is locked and if timeout has expired
@@ -836,11 +846,10 @@ public partial class TradeUtils
                                             logMessage($"Auto TP skipped: TP locked, waiting for window or timeout ({Math.Max(0, remainingTime):F1}s remaining)");
                                         }
                                     }
-                                    // If already in hideout, trigger fast mode directly (no area change will occur)
-                                    else if (_parent.Settings.LiveSearch.FastMode.FastMode.Value && _parent.GameController.Area.CurrentArea.IsHideout)
+                                    else if (_parent.GameController.Area.CurrentArea.IsHideout && Config.FastMode.Value)
                                     {
                                         logMessage($"🚀 FAST MODE: Already in hideout, triggering fast mode for item at ({x}, {y})");
-                                        _parent.TriggerFastMode(x, y);
+                                        _parent.TriggerFastMode(x, y, Config.SearchId.Value);
                                     }
                                     // REMOVED: Mouse movement should only happen after manual teleports, not when auto TP is blocked by cooldown
                                 }

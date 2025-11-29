@@ -75,12 +75,18 @@ public partial class TradeUtils
     // Cached purchase window position for Fast Mode
     private (float x, float y) _cachedPurchaseWindowTopLeft = (0, 0);
     private bool _hasCachedPosition = false;
-
+    
     // When true, always perform auto-buy clicks regardless of LiveSearch AutoBuy setting (used by BulkBuy).
     private bool _forceAutoBuy = false;
     
     // When true, Ctrl key is held down for BulkBuy operations (to avoid repeated press/release)
     private bool _bulkBuyCtrlHeld = false;
+    
+    // LiveSearch pause state (pauses processing but keeps websockets open)
+    private bool _liveSearchPaused = false;
+    
+    // LiveSearch started state (only start listeners when explicitly started via GUI)
+    private bool _liveSearchStarted = false;
     
     // ==================== HELPER METHODS ====================
     
@@ -307,9 +313,29 @@ public partial class TradeUtils
 
         return LiveSearchSettings?.SecureSessionId ?? string.Empty;
     }
+    
+    private LiveSearchInstanceSettings GetSearchConfigBySearchId(string searchId)
+    {
+        if (string.IsNullOrEmpty(searchId)) return null;
+        
+        foreach (var group in Settings.LiveSearch.Groups)
+        {
+            foreach (var search in group.Searches)
+            {
+                if (search.SearchId.Value == searchId)
+                {
+                    return search;
+                }
+            }
+        }
+        return null;
+    }
 
     // Set true when the last teleport API call reported success.
     private bool _lastTeleportSucceeded = false;
+    
+    // Track if last teleport failed due to item expiration (NotFound)
+    private bool _lastTeleportItemExpired = false;
 
     private string GetInventorySignature()
     {

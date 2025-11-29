@@ -61,7 +61,9 @@ public partial class TradeUtils
         }
     }
     
-    private void RenderLiveSearchGui()
+    // Old GUI method - replaced by TradeUtils.LiveSearch.Gui.cs
+    // Keeping this stub for backwards compatibility but it's not used anymore
+    private void RenderLiveSearchGuiOld()
     {
         if (!Settings.LiveSearch.General.ShowGui.Value) return;
 

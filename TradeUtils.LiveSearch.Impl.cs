@@ -11,7 +11,6 @@ namespace TradeUtils;
 
 public partial class TradeUtils
 {
-    // Connection queue system (matching POE2 version)
     private readonly Queue<LiveSearchInstanceSettings> _connectionQueue = new Queue<LiveSearchInstanceSettings>();
     private DateTime _lastConnectionTime = DateTime.MinValue;
     private string _lastActiveConfigsHash = "";
@@ -23,12 +22,10 @@ public partial class TradeUtils
     private static DateTime _pluginStartTime = DateTime.Now;
     private static DateTime _lastGlobalReset = DateTime.Now;
     
-    // Purchase window tracking for mouse movement
     private bool _lastPurchaseWindowVisible = false;
     private bool _allowMouseMovement = true;
     private bool _windowWasClosedSinceLastMovement = true;
     
-    // Burst protection
     private readonly Queue<Action> _burstQueue = new Queue<Action>();
     private DateTime _lastBurstProcessTime = DateTime.MinValue;
     private int _itemsProcessedThisSecond = 0;
@@ -44,7 +41,6 @@ public partial class TradeUtils
             _rateLimiter = new QuotaGuard(LogMessage, LogError, () => Settings.LiveSearch);
             LogMessage("✓ Rate limiter initialized");
             
-            // Initialize audio cancellation token for safe cleanup (if not already initialized)
             if (_audioDisposalToken == null || _audioDisposalToken.IsCancellationRequested)
             {
                 _audioDisposalToken = new CancellationTokenSource();
@@ -52,13 +48,10 @@ public partial class TradeUtils
             _isDisposed = false;
             LogMessage("✓ Audio system initialized");
             
-            // Set plugin instance reference in settings for GUI access
             Settings.LiveSearch.GroupsConfig.PluginInstance = this;
             
-            // Use secure session ID storage with fallback to regular session ID
             _sessionIdBuffer = Settings.LiveSearch.SecureSessionId ?? "";
             
-            // Fallback to regular session ID if secure storage is empty
             if (string.IsNullOrEmpty(_sessionIdBuffer))
             {
                 _sessionIdBuffer = Settings.LiveSearch.SessionId.Value ?? "";
@@ -86,7 +79,6 @@ public partial class TradeUtils
             {
                 LogMessage($"✓ Session ID loaded (length: {_sessionIdBuffer.Length})");
                 
-                // Validate session ID format
                 if (_sessionIdBuffer.Length != 32)
                 {
                     LogMessage($"⚠️  WARNING: Session ID length is {_sessionIdBuffer.Length}, expected 32 characters");
@@ -98,7 +90,6 @@ public partial class TradeUtils
                 }
             }
             
-            // Count configured searches
             int totalGroups = Settings.LiveSearch.Groups.Count;
             int enabledGroups = Settings.LiveSearch.Groups.Count(g => g.Enable.Value);
             int totalSearches = Settings.LiveSearch.Groups.Sum(g => g.Searches.Count);
@@ -136,13 +127,16 @@ public partial class TradeUtils
     {
         try
         {
-            // Cache purchase window position when available
+            if (_liveSearchPaused)
+            {
+                return;
+            }
+            
             if (!_hasCachedPosition)
             {
                 CachePurchaseWindowPosition();
             }
             
-            // FAST MODE: Simplified clicking execution - MUST BE FIRST
             if (_fastModePending)
             {
                 var now = DateTime.Now;
@@ -150,12 +144,10 @@ public partial class TradeUtils
                 
                 LogMessage($"🚀 FAST MODE: Click {_fastModeClickCount + 1}/{totalClicks}, CtrlPressed={_fastModeCtrlPressed}");
                 
-                // Check if we've completed all clicks
                 if (_fastModeClickCount >= totalClicks)
                 {
                     LogMessage("🚀 FAST MODE: All clicks completed, stopping");
                     
-                    // Release Ctrl key if it's still pressed
                     if (_fastModeCtrlPressed)
                     {
                         keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
@@ -170,20 +162,16 @@ public partial class TradeUtils
                     return;
                 }
                 
-                // Single-phase: use configured click delay
                 int currentDelay = Settings.LiveSearch.FastMode.FastModeClickDelayMs.Value;
                 
-                // Check if it's time for the next click
                 if (_fastModeLastClickTime == DateTime.MinValue || (now - _fastModeLastClickTime).TotalMilliseconds >= currentDelay)
                 {
                     try
                     {
-                        // First click: Move cursor and press Ctrl
                         if (_fastModeClickCount == 0)
                         {
                             LogMessage("🚀 FAST MODE: Starting execution - move cursor, press Ctrl, and first click");
                             
-                            // Press Ctrl key down and keep it pressed
                             if (!_fastModeCtrlPressed)
                             {
                                 keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYDOWN, UIntPtr.Zero);
@@ -192,18 +180,15 @@ public partial class TradeUtils
                                 Thread.Sleep(10);
                             }
                             
-                            // Move cursor to position
                             bool executed = TryExecuteFastMode().GetAwaiter().GetResult();
                             if (!executed)
                             {
                                 _fastModeRetryCount++;
                                 
-                                // Give up after 60 failed attempts (~2 seconds at 30fps)
                                 if (_fastModeRetryCount >= 60)
                                 {
                                     LogError($"🚀 FAST MODE TIMEOUT: Failed to position cursor after {_fastModeRetryCount} attempts (item likely sold/gone)");
                                     
-                                    // Release Ctrl key and reset fast mode
                                     if (_fastModeCtrlPressed)
                                     {
                                         keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
@@ -226,13 +211,11 @@ public partial class TradeUtils
                             }
                             else
                             {
-                                // Reset retry count on success
                                 _fastModeRetryCount = 0;
                             }
                         }
                         else
                         {
-                            // Ensure Ctrl is still pressed for subsequent clicks
                             if (!_fastModeCtrlPressed)
                             {
                                 keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYDOWN, UIntPtr.Zero);
@@ -241,7 +224,6 @@ public partial class TradeUtils
                             }
                         }
                         
-                        // Perform click
                         LogMessage($"🚀 FAST MODE: Click {_fastModeClickCount + 1} (Delay: {currentDelay}ms)");
                         
                         mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, UIntPtr.Zero);
@@ -252,7 +234,7 @@ public partial class TradeUtils
                         _fastModeClickCount++;
                         _fastModeLastClickTime = now;
                         
-                        return; // Skip the rest of the tick processing
+                        return;
                     }
                     catch (Exception ex)
                     {
@@ -260,13 +242,11 @@ public partial class TradeUtils
                     }
                 }
                 
-                return; // Still in fast mode, skip normal processing
+                return;
             }
             
-            // CRITICAL: IMMEDIATE PLUGIN DISABLE CHECK - HIGHEST PRIORITY
             if (!Settings.Enable.Value)
             {
-                // Release Ctrl key if it's pressed during fast mode
                 if (_fastModeCtrlPressed)
                 {
                     keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
@@ -286,12 +266,10 @@ public partial class TradeUtils
                 return;
             }
             
-            // EMERGENCY SHUTDOWN CHECK - use throttling instead of shutdown
             if (_emergencyShutdown)
             {
                 LogError("🚨 CONNECTION THROTTLING: Global connection limit reached, waiting for cooldown...");
                 
-                // Reset emergency shutdown after time
                 if ((DateTime.Now - _pluginStartTime).TotalMinutes >= 5)
                 {
                     LogMessage("♻️  Resetting emergency shutdown state after 5 minutes");
@@ -301,7 +279,6 @@ public partial class TradeUtils
                 return;
             }
             
-            // CRITICAL: Check TP lock timeout to prevent infinite locks
             if (_tpLocked && (DateTime.Now - _tpLockedTime).TotalSeconds >= 10)
             {
                 LogMessage("🔓 TP UNLOCKED: 10-second timeout reached in Tick(), unlocking TP");
@@ -309,13 +286,11 @@ public partial class TradeUtils
                 _tpLockedTime = DateTime.MinValue;
             }
             
-            // Ensure rate limiter is initialized
             if (_rateLimiter == null)
             {
                 _rateLimiter = new QuotaGuard(LogMessage, LogError, () => Settings.LiveSearch);
             }
             
-            // Check if enable state changed
             if (_lastEnableState != Settings.Enable.Value)
             {
                 _lastEnableState = Settings.Enable.Value;
@@ -331,14 +306,11 @@ public partial class TradeUtils
                 }
             }
             
-            // CRITICAL: Throttle listener management EXCEPT for immediate settings changes
             bool recentSettingsChange = (DateTime.Now - _lastSettingsChangeTime).TotalSeconds < 1;
             if ((DateTime.Now - _lastTickProcessTime).TotalSeconds < 2 && !recentSettingsChange)
             {
-                // ONLY process basic functionality IF plugin is enabled
                 if (Settings.Enable.Value)
                 {
-                    // Check hotkeys and purchase window
                     bool hotkeyState = Input.GetKeyState(Settings.LiveSearch.General.TravelHotkey.Value);
                     if (hotkeyState && !_lastHotkeyState)
                     {
@@ -347,25 +319,20 @@ public partial class TradeUtils
                     }
                     _lastHotkeyState = hotkeyState;
                 }
-                return; // Skip listener management
+                return;
             }
             
-            // AREA CHANGE PROTECTION: Reduced delay, can be overridden by settings changes
             bool recentAreaChange = (DateTime.Now - _lastAreaChangeTime).TotalSeconds < 5;
             if (recentAreaChange && !recentSettingsChange)
             {
-                // Only log once to avoid spam
                 if (!_areaChangeCooldownLogged)
                 {
                     LogMessage("⏳ AREA CHANGE COOLDOWN: Skipping listener management for 5s after area change");
                     _areaChangeCooldownLogged = true;
                 }
                 
-                // IMPORTANT: Still check purchase window during area change cooldown
-                // This prevents the 5-second delay for mouse movement after teleporting
                 bool areaChangePurchaseWindowVisible = GameController.IngameState.IngameUi.PurchaseWindowHideout.IsVisible;
                 
-                // Track window close events
                 if (!areaChangePurchaseWindowVisible && _lastPurchaseWindowVisible)
                 {
                     LogMessage("🔓 PURCHASE WINDOW CLOSED (During Area Cooldown): Mouse movement will be allowed on next window open");
@@ -373,53 +340,52 @@ public partial class TradeUtils
                     _allowMouseMovement = true;
                 }
                 
-                        if (areaChangePurchaseWindowVisible && !_lastPurchaseWindowVisible)
-                        {
-                            LogMessage($"🔔 PURCHASE WINDOW OPENED (During Area Cooldown): MoveMouseToItem={Settings.LiveSearch.AutoFeatures.MoveMouseToItem.Value}, TeleportedLocation={(_teleportedItemLocation.X != 0 || _teleportedItemLocation.Y != 0 ? $"({_teleportedItemLocation.X}, {_teleportedItemLocation.Y})" : "null")}");
-                            
-                            if (_tpLocked)
+                if (areaChangePurchaseWindowVisible && !_lastPurchaseWindowVisible)
+                {
+                    LogMessage($"🔔 PURCHASE WINDOW OPENED (During Area Cooldown): MoveMouseToItem={Settings.LiveSearch.AutoFeatures.MoveMouseToItem.Value}, TeleportedLocation={(_teleportedItemLocation.X != 0 || _teleportedItemLocation.Y != 0 ? $"({_teleportedItemLocation.X}, {_teleportedItemLocation.Y})" : "null")}");
+                    
+                    if (_tpLocked)
                             {
                                 LogMessage("🔓 TP UNLOCKED (During Area Cooldown): Purchase window opened successfully");
                                 _tpLocked = false;
                                 _tpLockedTime = DateTime.MinValue;
                             }
-                        }
+                }
                 
-                // Move mouse to item when window opens (even during area change cooldown!)
-                        if (areaChangePurchaseWindowVisible && !_lastPurchaseWindowVisible &&
-                            Settings.LiveSearch.AutoFeatures.MoveMouseToItem.Value)
+                if (areaChangePurchaseWindowVisible && !_lastPurchaseWindowVisible &&
+                    Settings.LiveSearch.AutoFeatures.MoveMouseToItem.Value)
+                {
+                    bool hasTeleportedItemLocation = _teleportedItemLocation.X != 0 || _teleportedItemLocation.Y != 0;
+                    if (_allowMouseMovement && (_windowWasClosedSinceLastMovement || hasTeleportedItemLocation))
+                    {
+                        if (_teleportedItemLocation.X != 0 || _teleportedItemLocation.Y != 0)
                         {
-                            bool hasTeleportedItemLocation = _teleportedItemLocation.X != 0 || _teleportedItemLocation.Y != 0;
-                            if (_allowMouseMovement && (_windowWasClosedSinceLastMovement || hasTeleportedItemLocation))
+                            LogMessage($"🖱️ SAFE MOUSE MOVE (During Area Cooldown): Moving to teleported item at ({_teleportedItemLocation.X}, {_teleportedItemLocation.Y})");
+                            MoveMouseToItemLocation(_teleportedItemLocation.X, _teleportedItemLocation.Y);
+                            _teleportedItemLocation = (0, 0);
+                            _allowMouseMovement = false;
+                            _windowWasClosedSinceLastMovement = false;
+                        }
+                        else if (_recentItems.Count > 0)
+                        {
+                            lock (_recentItemsLock)
                             {
-                                if (_teleportedItemLocation.X != 0 || _teleportedItemLocation.Y != 0)
+                                if (_recentItems.Count > 0)
                                 {
-                                    LogMessage($"🖱️ SAFE MOUSE MOVE (During Area Cooldown): Moving to teleported item at ({_teleportedItemLocation.X}, {_teleportedItemLocation.Y})");
-                                    MoveMouseToItemLocation(_teleportedItemLocation.X, _teleportedItemLocation.Y);
-                                    _teleportedItemLocation = (0, 0);
+                                    LogMessage("🖱️ SAFE FALLBACK MOVE (During Area Cooldown): Using most recent item");
+                                    var item = _recentItems.Peek();
+                                    MoveMouseToItemLocation(item.X, item.Y);
                                     _allowMouseMovement = false;
                                     _windowWasClosedSinceLastMovement = false;
                                 }
-                                else if (_recentItems.Count > 0)
-                                {
-                                    lock (_recentItemsLock)
-                                    {
-                                        if (_recentItems.Count > 0)
-                                        {
-                                            LogMessage("🖱️ SAFE FALLBACK MOVE (During Area Cooldown): Using most recent item");
-                                            var item = _recentItems.Peek();
-                                            MoveMouseToItemLocation(item.X, item.Y);
-                                            _allowMouseMovement = false;
-                                            _windowWasClosedSinceLastMovement = false;
-                                        }
-                                    }
-                                }
                             }
                         }
+                    }
+                }
                 
                 _lastPurchaseWindowVisible = areaChangePurchaseWindowVisible;
                 
-                return; // Skip listener management but allow purchase window handling
+                return;
             }
             else if (!recentAreaChange)
             {
@@ -428,7 +394,6 @@ public partial class TradeUtils
             
             _lastTickProcessTime = DateTime.Now;
             
-            // SAFETY CHECK: If plugin is disabled, ensure all listeners are stopped
             if (!Settings.Enable.Value && _listeners.Count > 0)
             {
                 LogMessage($"🛑 SAFETY CHECK: Plugin disabled but {_listeners.Count} listeners still active - forcing stop");
@@ -436,13 +401,12 @@ public partial class TradeUtils
                 return;
             }
             
-            // Process connection queue first
-            ProcessConnectionQueue();
-            
-            // Process burst queue for rate-limited item processing
+            if (_liveSearchStarted)
+            {
+                ProcessConnectionQueue();
+            }
             ProcessBurstQueue();
             
-            // Periodic reset of global connection attempts (every 2 minutes)
             if ((DateTime.Now - _lastGlobalReset).TotalMinutes >= 2)
             {
                 if (_globalConnectionAttempts > 0)
@@ -453,7 +417,6 @@ public partial class TradeUtils
                 }
             }
             
-            // Check hotkey state
             bool currentHotkeyState = Input.GetKeyState(Settings.LiveSearch.General.TravelHotkey.Value);
             if (currentHotkeyState && !_lastHotkeyState)
             {
@@ -462,10 +425,8 @@ public partial class TradeUtils
             }
             _lastHotkeyState = currentHotkeyState;
             
-            // Check for auto stash if enabled and not already in progress
             if (Settings.LiveSearch.AutoFeatures.AutoStash.Value && !_autoStashInProgress && !_autoTpPaused)
             {
-                // Don't run auto stash during loading, not in game, or during rate limiting
                 if (!GameController.IsLoading && GameController.InGame && (_rateLimiter == null || !_rateLimiter.IsRateLimited()))
                 {
                     if (IsInventoryFullFor2x4Item())
@@ -476,10 +437,8 @@ public partial class TradeUtils
                 }
             }
             
-            // Check if purchase window just opened and move mouse to teleported item
             bool currentPurchaseWindowVisible = GameController.IngameState.IngameUi.PurchaseWindowHideout.IsVisible;
             
-            // Track window close events to allow mouse movement on next open
             if (!currentPurchaseWindowVisible && _lastPurchaseWindowVisible)
             {
                 LogMessage("🔓 PURCHASE WINDOW CLOSED: Mouse movement will be allowed on next window open");
@@ -972,30 +931,38 @@ public partial class TradeUtils
             
             LogDebug("🔄 LiveSearch: Teleport state reset");
             
-            // FAST MODE: Trigger fast clicking when arriving in hideout after teleport
-            if (Settings.LiveSearch.FastMode.FastMode.Value && _teleportedItemLocation.X != 0 && _teleportedItemLocation.Y != 0)
+            if (_teleportedItemLocation.X != 0 && _teleportedItemLocation.Y != 0)
             {
-                LogMessage($"🚀 FAST MODE: Area loaded, initiating fast mode for coordinates ({_teleportedItemLocation.X}, {_teleportedItemLocation.Y})");
-                
-                // Store coordinates for execution
                 var coords = _teleportedItemLocation;
-                _teleportedItemLocation = (0, 0); // Clear immediately to prevent double execution
+                _teleportedItemLocation = (0, 0);
                 
-                // Initialize fast mode
-                _fastModePending = true;
-                _fastModeCoords = coords;
-                _fastModeStartTime = DateTime.Now;
-                _fastModeClickCount = 0;
-                _fastModeCtrlPressed = false;
-                _fastModeInInitialPhase = true;
-                _fastModeLastClickTime = DateTime.MinValue;
-                _fastModeRetryCount = 0;
+                string searchId = null;
+                if (_currentTeleportingItem != null && !string.IsNullOrEmpty(_currentTeleportingItem.SearchId))
+                {
+                    searchId = _currentTeleportingItem.SearchId;
+                }
                 
-                LogMessage($"🚀 FAST MODE INIT: duration={Settings.LiveSearch.FastMode.FastModeClickDurationSec.Value}s, delay={Settings.LiveSearch.FastMode.FastModeClickDelayMs.Value}ms");
+                var searchConfig = !string.IsNullOrEmpty(searchId) ? GetSearchConfigBySearchId(searchId) : null;
+                bool fastModeEnabled = searchConfig?.FastMode.Value ?? Settings.LiveSearch.FastMode.FastMode.Value;
                 
-                // Calculate expected total clicks
-                var totalClicks = Math.Max(1, (int)Math.Floor((Settings.LiveSearch.FastMode.FastModeClickDurationSec.Value * 1000f) / Math.Max(1, Settings.LiveSearch.FastMode.FastModeClickDelayMs.Value)));
-                LogMessage($"🚀 FAST MODE: Will perform approximately {totalClicks} clicks");
+                if (fastModeEnabled)
+                {
+                    LogMessage($"🚀 FAST MODE: Area loaded, initiating fast mode for coordinates ({coords.X}, {coords.Y})");
+                    
+                    _fastModePending = true;
+                    _fastModeCoords = coords;
+                    _fastModeStartTime = DateTime.Now;
+                    _fastModeClickCount = 0;
+                    _fastModeCtrlPressed = false;
+                    _fastModeInInitialPhase = true;
+                    _fastModeLastClickTime = DateTime.MinValue;
+                    _fastModeRetryCount = 0;
+                    
+                    LogMessage($"🚀 FAST MODE INIT: duration={Settings.LiveSearch.FastMode.FastModeClickDurationSec.Value}s, delay={Settings.LiveSearch.FastMode.FastModeClickDelayMs.Value}ms");
+                    
+                    var totalClicks = Math.Max(1, (int)Math.Floor((Settings.LiveSearch.FastMode.FastModeClickDurationSec.Value * 1000f) / Math.Max(1, Settings.LiveSearch.FastMode.FastModeClickDelayMs.Value)));
+                    LogMessage($"🚀 FAST MODE: Will perform approximately {totalClicks} clicks");
+                }
             }
         }
         catch (Exception ex)

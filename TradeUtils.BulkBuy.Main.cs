@@ -25,7 +25,6 @@ namespace TradeUtils;
 
 public partial class TradeUtils
 {
-    // BulkBuy-specific fields
     private Queue<BulkBuyItem> _bulkBuyQueue = new Queue<BulkBuyItem>();
     private BulkBuyItem _currentBulkBuyItem = null;
     private bool _bulkBuyInProgress = false;
@@ -53,7 +52,6 @@ public partial class TradeUtils
                 _rateLimiter = new QuotaGuard(LogMessage, LogError, () => LiveSearchSettings);
             }
 
-            // Validate BulkBuy session id (POESESSID)
             var bulkSession = Settings.BulkBuy.SessionId?.Value ?? "";
             if (string.IsNullOrWhiteSpace(bulkSession))
             {
@@ -82,14 +80,12 @@ public partial class TradeUtils
 
     partial void AreaChangeBulkBuy(AreaInstance area)
     {
-        // BulkBuy doesn't need area change handling currently
     }
 
     partial void DisposeBulkBuy()
     {
         try
         {
-            // Clean up any bulk buy resources
             _bulkBuyQueue?.Clear();
         }
         catch (Exception ex)
@@ -104,13 +100,10 @@ public partial class TradeUtils
         {
             if (!GameController.Window.IsForeground())
             {
-                if (_bulkBuyInProgress)
+                if (_bulkBuyInProgress && !_bulkBuyPausedForFocus)
                 {
-                    if (!_bulkBuyPausedForFocus)
-                    {
-                        LogMessage("BulkBuy: Game not focused, pausing (will auto-resume when focused).");
-                        _bulkBuyPausedForFocus = true;
-                    }
+                    LogMessage("BulkBuy: Game not focused, pausing (will auto-resume when focused).");
+                    _bulkBuyPausedForFocus = true;
                 }
                 return;
             }
@@ -193,7 +186,6 @@ public partial class TradeUtils
                 return;
             }
 
-            // Make sure we have a valid session id (use BulkBuy's own POESESSID field)
             var sessionId = Settings.BulkBuy.SessionId?.Value ?? "";
             if (string.IsNullOrWhiteSpace(sessionId))
             {
@@ -235,7 +227,6 @@ public partial class TradeUtils
 
             LogMessage($"BulkBuy: Starting with {activeSearches.Count} enabled searches");
 
-            // Run the main loop on a background task
             _bulkBuyTask = Task.Run(() => RunBulkBuyLoopAsync(activeSearches, sessionId, _bulkBuyCts.Token));
         }
         catch (Exception ex)
@@ -259,7 +250,6 @@ public partial class TradeUtils
             _bulkBuyPausedForFocus = false;
             Settings.BulkBuy.IsRunning = false;
 
-            // Release Ctrl if it's being held
             if (_bulkBuyCtrlHeld)
             {
                 try
@@ -280,7 +270,6 @@ public partial class TradeUtils
             }
             catch
             {
-                // ignore
             }
 
             _bulkBuyQueue?.Clear();
@@ -294,10 +283,6 @@ public partial class TradeUtils
         }
     }
 
-    /// <summary>
-    /// Main BulkBuy processing loop. Iterates through all enabled searches,
-    /// calls the trade search API, and processes items one by one.
-    /// </summary>
     private async Task RunBulkBuyLoopAsync(
         System.Collections.Generic.List<BulkBuySearch> activeSearches,
         string sessionId,
@@ -305,7 +290,6 @@ public partial class TradeUtils
     {
         try
         {
-            // No global max; enforcement is per-search via BulkBuySearch.MaxItems
             int globalRemaining = int.MaxValue;
 
             foreach (var search in activeSearches)
@@ -313,9 +297,8 @@ public partial class TradeUtils
                 if (ct.IsCancellationRequested) break;
                 if (!_bulkBuyInProgress) break;
 
-                if (!search.Enable.Value) continue; // Skip if disabled mid-run
+                if (!search.Enable.Value) continue;
 
-                // Per-search max
                 int perSearchMax = search.MaxItems?.Value ?? 0;
                 if (perSearchMax <= 0) perSearchMax = int.MaxValue;
 
@@ -346,7 +329,6 @@ public partial class TradeUtils
         }
         finally
         {
-            // Always release Ctrl if it's being held
             if (_bulkBuyCtrlHeld)
             {
                 try
@@ -366,9 +348,6 @@ public partial class TradeUtils
         }
     }
 
-    /// <summary>
-    /// Executes a single BulkBuy search: fetches result ids, then processes items one-by-one.
-    /// </summary>
     private async Task<int> ProcessBulkBuyForSearchAsync(
         BulkBuySearch search,
         int maxItemsForSearch,
@@ -379,17 +358,14 @@ public partial class TradeUtils
 
         try
         {
-            // Safety: ensure we have a JSON body
             if (string.IsNullOrWhiteSpace(search.QueryJson?.Value))
             {
                 LogError($"BulkBuy: Search '{search.Name.Value}' has empty Query JSON, skipping.");
                 return 0;
             }
 
-            // Loop until we've bought maxItemsForSearch, or there are no more items, or cancelled
             while (purchasedCount < maxItemsForSearch && !ct.IsCancellationRequested && _bulkBuyInProgress)
             {
-                // Check inventory before each search pass
                 if (IsInventoryFullFor2x4Item())
                 {
                     LogMessage("BulkBuy: Inventory is full (no 2x4 space). Stopping bulk buy.");
@@ -397,7 +373,6 @@ public partial class TradeUtils
                     break;
                 }
 
-                // Respect rate limit (shared QuotaGuard)
                 if (_rateLimiter != null && !_rateLimiter.CanMakeRequest())
                 {
                     LogMessage($"BulkBuy: Quota too low before search request - {_rateLimiter.GetStatus()}");
@@ -408,7 +383,6 @@ public partial class TradeUtils
                     }
                 }
 
-                // POST /api/trade/search/{league} with raw JSON body (normal trade search flow)
                 string league = string.IsNullOrWhiteSpace(search.League?.Value) ? "Keepers" : search.League.Value;
                 string searchUrl = $"https://www.pathofexile.com/api/trade/search/{league}";
 
@@ -469,7 +443,6 @@ public partial class TradeUtils
 
                         LogMessage($"BulkBuy: Search '{search.Name.Value}' returned {searchResponse.Result.Length} items (total={searchResponse.Total}).");
 
-                        // Process items in batches of up to 10 IDs per fetch request
                         var allIds = searchResponse.Result;
                         const int maxPerBatch = 10;
 
@@ -636,6 +609,13 @@ public partial class TradeUtils
                             remainingAllowed - purchasedInBatch,
                             ct);
 
+                        // If -1 returned, items are expired - need to fetch fresh batch
+                        if (purchasedFromSeller == -1)
+                        {
+                            LogMessage($"⚠️ BulkBuy: Items expired, breaking out of seller loop to fetch fresh batch.");
+                            break; // Exit sellers loop, will fetch new batch on next iteration of main loop
+                        }
+
                         purchasedInBatch += purchasedFromSeller;
 
                         if (purchasedInBatch >= remainingAllowed)
@@ -758,6 +738,11 @@ public partial class TradeUtils
 
                     lock (_recentItemsLock)
                     {
+                        // Clear any old items from previous sellers to prevent teleporting to wrong item
+                        while (_recentItems.Count > 0)
+                        {
+                            _recentItems.Dequeue();
+                        }
                         _recentItems.Enqueue(recent);
                     }
 
@@ -765,9 +750,9 @@ public partial class TradeUtils
                     _windowWasClosedSinceLastMovement = true;
                     _forceAutoBuy = true;
                     _lastTeleportSucceeded = false;
-                    TravelToHideout(isManual: false);
+                    TravelToHideout(isManual: false, allowRetry: false);
 
-                    // Wait for teleport to complete
+                    // Wait for teleport API response
                     int teleportWaitMs = 0;
                     while (!_lastTeleportSucceeded && teleportWaitMs < 5000 && !ct.IsCancellationRequested && _bulkBuyInProgress)
                     {
@@ -777,11 +762,47 @@ public partial class TradeUtils
 
                     if (!_lastTeleportSucceeded)
                     {
-                        LogMessage($"BulkBuy: Teleport for item {itemModel.Id} did not succeed, treating as failed.");
+                        LogMessage($"BulkBuy: Teleport for item {itemModel.Id} did not succeed.");
+                        
+                        // Check if item expired - this means batch is stale, need to refetch
+                        var (tokenIssuedAt, tokenExpiresAt) = RecentItem.ParseTokenTimes(bulkItem.HideoutToken);
+                        bool tokenExpired = DateTime.Now > tokenExpiresAt;
+                        bool itemExpired = _lastTeleportItemExpired; // Check if API said item expired
+                        
+                        // If item is expired (either token expired or API said "Resource not found"), refetch batch
+                        if (tokenExpired || itemExpired)
+                        {
+                            LogMessage($"⚠️ BulkBuy: Item '{bulkItem.Name}' is expired (tokenExpired={tokenExpired}, apiExpired={itemExpired}), batch is stale. Refetching batch.");
+                            Settings.BulkBuy.TotalItemsProcessed++;
+                            Settings.BulkBuy.FailedPurchases++;
+                            // Break out of seller loop completely, which will trigger new batch fetch
+                            goto SELLER_EXPIRED;
+                        }
+                        
                         Settings.BulkBuy.TotalItemsProcessed++;
                         Settings.BulkBuy.FailedPurchases++;
                         continue;
                     }
+
+                    // CRITICAL: Wait for loading screen to finish before checking for purchase window
+                    // The timer for purchase window should only start AFTER we've loaded in
+                    LogDebug("BulkBuy: Waiting for loading screen to finish after teleport...");
+                    int loadingWaitMs = 0;
+                    while (GameController.IsLoading && loadingWaitMs < 10000 && !ct.IsCancellationRequested && _bulkBuyInProgress)
+                    {
+                        await Task.Delay(200, ct);
+                        loadingWaitMs += 200;
+                    }
+                    
+                    if (GameController.IsLoading)
+                    {
+                        LogMessage($"⚠️ BulkBuy: Still in loading screen after 10 seconds for '{bulkItem.Name}', skipping.");
+                        Settings.BulkBuy.TotalItemsProcessed++;
+                        Settings.BulkBuy.FailedPurchases++;
+                        continue;
+                    }
+                    
+                    LogDebug("BulkBuy: Loading screen finished, now checking for purchase window...");
 
                     firstItem = false;
                 }
@@ -819,15 +840,67 @@ public partial class TradeUtils
                         continue;
                     }
 
-                    // Wait for tab switch (150-250ms)
+                    // CRITICAL: Wait for old purchase window to close first (if it was open)
+                    // This prevents clicking in the old hideout before loading screen
+                    int closeWaitMs = 0;
+                    while (closeWaitMs < 2000 && !ct.IsCancellationRequested && _bulkBuyInProgress)
+                    {
+                        try
+                        {
+                            var purchaseWindow = GameController.IngameState.IngameUi.PurchaseWindowHideout;
+                            if (purchaseWindow == null || !purchaseWindow.IsVisible)
+                            {
+                                LogDebug("BulkBuy: Old purchase window closed, proceeding...");
+                                break; // Window closed, safe to proceed
+                            }
+                        }
+                        catch
+                        {
+                            // Ignore exceptions during window check
+                        }
+                        await Task.Delay(100, ct);
+                        closeWaitMs += 100;
+                    }
+                    
+                    // Wait for tab switch
                     await Task.Delay(200, ct);
+                    
+                    // CRITICAL: Wait for loading screen to finish (if any)
+                    // Don't start purchase window timer until we're loaded in
+                    LogDebug("BulkBuy: Checking for loading screen after hideout token...");
+                    int loadingWaitMs = 0;
+                    while (GameController.IsLoading && loadingWaitMs < 10000 && !ct.IsCancellationRequested && _bulkBuyInProgress)
+                    {
+                        await Task.Delay(200, ct);
+                        loadingWaitMs += 200;
+                    }
+                    
+                    if (GameController.IsLoading)
+                    {
+                        LogMessage($"⚠️ BulkBuy: Still in loading screen after 10 seconds for '{bulkItem.Name}', skipping.");
+                        Settings.BulkBuy.TotalItemsProcessed++;
+                        Settings.BulkBuy.FailedPurchases++;
+                        continue;
+                    }
+                    
+                    LogDebug("BulkBuy: Loading screen finished (or none), now checking for purchase window...");
                 }
 
                 // Wait for purchase window to open (max 3 seconds)
+                // Timer only starts AFTER we've confirmed we're not loading
                 bool windowOpened = await WaitForPurchaseWindowAsync(3000, ct);
                 if (!windowOpened)
                 {
                     LogMessage($"BulkBuy: Purchase window did not open within 3 seconds for item '{bulkItem.Name}', skipping.");
+                    Settings.BulkBuy.TotalItemsProcessed++;
+                    Settings.BulkBuy.FailedPurchases++;
+                    continue;
+                }
+                
+                // Double-check we're not in a loading screen before proceeding
+                if (GameController.IsLoading)
+                {
+                    LogMessage($"BulkBuy: Still in loading screen after window opened for '{bulkItem.Name}', skipping.");
                     Settings.BulkBuy.TotalItemsProcessed++;
                     Settings.BulkBuy.FailedPurchases++;
                     continue;
@@ -875,7 +948,47 @@ public partial class TradeUtils
                 }
             }
 
+            // Clear recent items queue to prevent old items from interfering with next seller
+            lock (_recentItemsLock)
+            {
+                while (_recentItems.Count > 0)
+                {
+                    _recentItems.Dequeue();
+                }
+            }
+            _teleportedItemInfo = null;
+            _currentTeleportingItem = null;
+
             return purchasedFromSeller;
+        
+        SELLER_EXPIRED:
+            // Items expired - release Ctrl, clear state, return to outer loop
+            if (_bulkBuyCtrlHeld)
+            {
+                try
+                {
+                    keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+                    _bulkBuyCtrlHeld = false;
+                    LogMessage("BulkBuy: Released Ctrl key (items expired)");
+                }
+                catch (Exception ex)
+                {
+                    LogError($"BulkBuy: Error releasing Ctrl key: {ex.Message}");
+                }
+            }
+            
+            lock (_recentItemsLock)
+            {
+                while (_recentItems.Count > 0)
+                {
+                    _recentItems.Dequeue();
+                }
+            }
+            _teleportedItemInfo = null;
+            _currentTeleportingItem = null;
+            
+            // Return -1 to signal that we need to fetch a fresh batch
+            return -1;
         }
         catch (OperationCanceledException)
         {
@@ -899,13 +1012,21 @@ public partial class TradeUtils
     {
         try
         {
-            if (_rateLimiter != null && !_rateLimiter.CanMakeRequest())
+            // Use separate scope for teleport/whisper API rate limiting
+            const string teleportScope = "whisper";
+            
+            if (_rateLimiter != null && !_rateLimiter.CanMakeRequest(teleportScope))
             {
-                LogMessage($"BulkBuy: Quota too low before sending hideout token - {_rateLimiter.GetStatus()}");
-                int waitMs = _rateLimiter.GetTimeUntilReset();
+                LogMessage($"⛔ TELEPORT QUOTA TOO LOW: Skipping hideout token - {_rateLimiter.GetStatus(teleportScope)}");
+                int waitMs = _rateLimiter.GetTimeUntilReset(teleportScope);
                 if (waitMs > 0)
                 {
+                    LogMessage($"⏳ Teleport quota resets in {waitMs / 1000} seconds, waiting...");
                     await Task.Delay(Math.Min(waitMs, 30_000), ct);
+                }
+                else
+                {
+                    return false; // Can't proceed without quota
                 }
             }
 
@@ -925,9 +1046,16 @@ public partial class TradeUtils
 
             using (var response = await _httpClient.SendAsync(request, ct))
             {
+                // Parse rate limit headers for teleport scope
                 if (_rateLimiter != null)
                 {
-                    await _rateLimiter.HandleRateLimitResponse(response);
+                    _rateLimiter.ParseRateLimitHeaders(response);
+                    var rateLimitWaitTime = await _rateLimiter.HandleRateLimitResponse(response);
+                    if (rateLimitWaitTime > 0)
+                    {
+                        LogMessage($"🚨 TELEPORT RATE LIMITED! Hideout token request blocked.");
+                        return false;
+                    }
                 }
 
                 if (!response.IsSuccessStatusCode)
@@ -1008,50 +1136,173 @@ public partial class TradeUtils
                 continue;
             }
 
-            // Move mouse and click (MoveMouseToItemLocation handles clicking and second-click logic internally)
+            // CRITICAL: Check if we're in a loading screen - never buy during loading
+            if (GameController.IsLoading)
+            {
+                LogMessage($"⚠️ BulkBuy: Attempted to buy '{item.Name}' during loading screen, skipping attempt {attempt}");
+                if (attempt < maxAttempts)
+                {
+                    await Task.Delay(500, ct);
+                    continue;
+                }
+                else
+                {
+                    LogMessage($"❌ BulkBuy: All attempts for '{item.Name}' occurred during loading screen, giving up.");
+                    _forceAutoBuy = false;
+                    return false;
+                }
+            }
+            
+            // Check if purchase window is still open
+            try
+            {
+                var purchaseWindow = GameController.IngameState.IngameUi.PurchaseWindowHideout;
+                if (purchaseWindow == null || !purchaseWindow.IsVisible)
+                {
+                    LogMessage($"⚠️ BulkBuy: Purchase window not visible for '{item.Name}' on attempt {attempt}, skipping");
+                    if (attempt < maxAttempts)
+                    {
+                        await Task.Delay(500, ct);
+                        continue;
+                    }
+                    else
+                    {
+                        _forceAutoBuy = false;
+                        return false;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                LogMessage($"⚠️ BulkBuy: Error checking purchase window for '{item.Name}': {ex.Message}, skipping attempt {attempt}");
+                if (attempt < maxAttempts)
+                {
+                    await Task.Delay(500, ct);
+                    continue;
+                }
+                else
+                {
+                    _forceAutoBuy = false;
+                    return false;
+                }
+            }
+            
+            // Move mouse to item location first
             _forceAutoBuy = true;
             _allowMouseMovement = true;
             _windowWasClosedSinceLastMovement = true;
-            MoveMouseToItemLocation(item.X, item.Y);
-
-            // Wait for MoveMouseToItemLocation to complete its work (it waits 1s for second click if needed)
-            // So we wait 2.5s total to ensure both clicks and inventory update have time
-            await Task.Delay(2500, ct);
-
-            // Check multiple indicators of purchase success/failure
-            bool purchased = false;
-            for (int check = 0; check < 3; check++)
+            
+            // Move mouse to item location (without clicking)
+            await MoveMouseToItemLocationAsync(item.X, item.Y, ct);
+            
+            // Wait 100ms for tooltip to appear
+            await Task.Delay(100, ct);
+            
+            // Double-check we're still not loading and window is still open
+            if (GameController.IsLoading)
             {
-                // Check 1: Inventory signature changed (item added to inventory)
-                string sigAfter = GetInventorySignature();
-                if (sigAfter != sigBefore)
-                {
-                    LogMessage($"BulkBuy: Successfully bought '{item.Name}' on attempt {attempt} (inventory changed)");
-                    _forceAutoBuy = false;
-                    return true;
-                }
-
-                // Check 2: Item is on cursor (indicates failed purchase - item was picked up but not bought)
-                if (IsItemOnCursor())
-                {
-                    LogMessage($"BulkBuy: Item '{item.Name}' is on cursor after click, purchase failed. Dropping item...");
-                    await DropItemFromCursorAsync();
-                    // Continue to next check - this attempt failed
-                    continue;
-                }
-
-                // Check 3: Item no longer exists in stash (purchase successful)
-                if (!IsItemStillInStash(item.X, item.Y))
-                {
-                    LogMessage($"BulkBuy: Successfully bought '{item.Name}' on attempt {attempt} (item no longer in stash)");
-                    _forceAutoBuy = false;
-                    return true;
-                }
-
-                if (check < 2)
+                LogMessage($"⚠️ BulkBuy: Loading screen detected after mouse movement for '{item.Name}', skipping attempt {attempt}");
+                if (attempt < maxAttempts)
                 {
                     await Task.Delay(500, ct);
+                    continue;
                 }
+                else
+                {
+                    _forceAutoBuy = false;
+                    return false;
+                }
+            }
+            
+            try
+            {
+                var purchaseWindow = GameController.IngameState.IngameUi.PurchaseWindowHideout;
+                if (purchaseWindow == null || !purchaseWindow.IsVisible)
+                {
+                    LogMessage($"⚠️ BulkBuy: Purchase window closed after mouse movement for '{item.Name}', skipping attempt {attempt}");
+                    if (attempt < maxAttempts)
+                    {
+                        await Task.Delay(500, ct);
+                        continue;
+                    }
+                    else
+                    {
+                        _forceAutoBuy = false;
+                        return false;
+                    }
+                }
+            }
+            catch
+            {
+                // Ignore exceptions
+            }
+            
+            // Verify item if enabled (experimental feature)
+            if (Settings.BulkBuy.EnableItemVerification.Value)
+            {
+                // Ctrl+C to copy item info and verify it matches
+                bool verified = await VerifyItemFromClipboardAsync(item.Name, item.Price, maxRetries: 1);
+                if (!verified)
+                {
+                    LogMessage($"⚠️ BulkBuy: Item verification failed for '{item.Name}' on attempt {attempt}, retrying...");
+                    if (attempt < maxAttempts)
+                    {
+                        await Task.Delay(300, ct);
+                        continue;
+                    }
+                    else
+                    {
+                        LogMessage($"❌ BulkBuy: Item verification failed after all attempts for '{item.Name}', skipping.");
+                        _forceAutoBuy = false;
+                        return false;
+                    }
+                }
+                
+                LogMessage($"✅ BulkBuy: Item '{item.Name}' verified, clicking now");
+            }
+            else
+            {
+                LogDebug($"BulkBuy: Item verification disabled, proceeding with click for '{item.Name}'");
+            }
+            
+            // Now perform the click
+            await PerformCtrlLeftClickAsync();
+
+            // Wait 250ms and check inventory state once
+            await Task.Delay(250, ct);
+            
+            string sigAfter = GetInventorySignature();
+            bool inventoryChanged = sigAfter != sigBefore;
+            bool itemGone = !IsItemStillInStash(item.X, item.Y);
+            bool itemOnCursor = IsItemOnCursor();
+            
+            LogMessage($"📊 BulkBuy: Post-click check for '{item.Name}': InvChanged={inventoryChanged}, ItemGone={itemGone}, OnCursor={itemOnCursor}");
+            
+            // Purchase successful if inventory changed OR item is gone (and not on cursor)
+            if ((inventoryChanged || itemGone) && !itemOnCursor)
+            {
+                LogMessage($"✅ BulkBuy: Successfully bought '{item.Name}' on attempt {attempt}");
+                
+                // Clear clipboard to prevent false positives
+                try
+                {
+                    await Task.Run(() => System.Windows.Forms.Clipboard.Clear());
+                    LogDebug("BulkBuy: Cleared clipboard");
+                }
+                catch (Exception ex)
+                {
+                    LogDebug($"BulkBuy: Failed to clear clipboard: {ex.Message}");
+                }
+                
+                _forceAutoBuy = false;
+                return true;
+            }
+
+            // If item is on cursor, the purchase failed (picked up instead of bought)
+            if (itemOnCursor)
+            {
+                LogMessage($"⚠️ BulkBuy: Item '{item.Name}' is on cursor after click, purchase failed. Dropping item...");
+                await DropItemFromCursorAsync();
             }
 
             LogMessage($"BulkBuy: Attempt {attempt}/{maxAttempts} failed for '{item.Name}' (inventory unchanged)");

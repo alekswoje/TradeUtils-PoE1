@@ -80,6 +80,19 @@ public class LiveSearchSubSettings
     // ===== INTERNAL SETTINGS =====
     [JsonIgnore]
     public Vector2 WindowPosition { get; set; } = new Vector2(10, 800);
+    
+    // ===== STATS TRACKING =====
+    [JsonIgnore]
+    public int TotalItemsProcessed { get; set; } = 0;
+    
+    [JsonIgnore]
+    public int SuccessfulPurchases { get; set; } = 0;
+    
+    [JsonIgnore]
+    public int FailedPurchases { get; set; } = 0;
+    
+    [JsonIgnore]
+    public DateTime StartTime { get; set; } = DateTime.MinValue;
 
     public List<SearchGroup> Groups { get; set; } = new List<SearchGroup>();
 
@@ -295,6 +308,11 @@ public class LiveSearchSubSettings
                             ImGui.InputText($"Search ID##search{i}{j}", ref searchId, 100);
                             search.SearchId.Value = searchId;
                             HelpMarker("Unique ID for the trade search");
+                            
+                            var fastMode = search.FastMode.Value;
+                            ImGui.Checkbox($"Fast Mode##search{i}{j}", ref fastMode);
+                            search.FastMode.Value = fastMode;
+                            HelpMarker("Enable fast mode for this search (rapid clicking)");
 
                             // Add "Open in Browser" button for individual search
                             if (!string.IsNullOrWhiteSpace(searchId))
@@ -410,6 +428,7 @@ public class LiveSearchInstanceSettings
     public TextNode Name { get; set; } = new TextNode("New Search");
     public TextNode League { get; set; } = new TextNode("Standard");
     public TextNode SearchId { get; set; } = new TextNode("");
+    public ToggleNode FastMode { get; set; } = new ToggleNode(false);
 }
 
 // ==================== LIVESEARCH SUBSECTIONS ====================
@@ -787,13 +806,12 @@ public class BulkBuySubSettings
     [Menu("Enable BulkBuy", "Enable or disable the BulkBuy sub-plugin")]
     public ToggleNode Enable { get; set; } = new ToggleNode(false);
 
+    [Menu("Enable Item Verification", "Verify item name and price from clipboard before clicking (experimental, off by default)")]
+    public ToggleNode EnableItemVerification { get; set; } = new ToggleNode(false);
+
     [Menu("Debug Mode", "Enable detailed logging for debugging")]
     [IgnoreMenu]
     public ToggleNode DebugMode { get; set; } = new ToggleNode(false);
-
-    [Menu("Show GUI", "Display the graphical user interface")]
-    [IgnoreMenu]
-    public ToggleNode ShowGui { get; set; } = new ToggleNode(true);
 
     [IgnoreMenu]
     public TextNode SessionId { get; set; } = new TextNode("");
@@ -891,7 +909,6 @@ public class BbGeneralSubMenu
     private readonly BulkBuySubSettings _p;
     public BbGeneralSubMenu(BulkBuySubSettings p) { _p = p; }
     [Menu("Debug Mode")] public ToggleNode DebugMode => _p.DebugMode;
-    [Menu("Show GUI")] public ToggleNode ShowGui => _p.ShowGui;
     [Menu("Toggle BulkBuy Hotkey")] public HotkeyNode ToggleHotkey => _p.ToggleHotkey;
 }
 
