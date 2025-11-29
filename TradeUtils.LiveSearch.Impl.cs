@@ -389,7 +389,8 @@ public partial class TradeUtils
                 // Move mouse to item when window opens (even during area change cooldown!)
                 if (areaChangePurchaseWindowVisible && !_lastPurchaseWindowVisible && Settings.LiveSearch.AutoFeatures.MoveMouseToItem.Value)
                 {
-                    if (_allowMouseMovement && _windowWasClosedSinceLastMovement)
+                    bool hasTeleportedItemLocation = _teleportedItemLocation.X != 0 || _teleportedItemLocation.Y != 0;
+                    if (_allowMouseMovement && (_windowWasClosedSinceLastMovement || hasTeleportedItemLocation))
                     {
                         if (_teleportedItemLocation.X != 0 || _teleportedItemLocation.Y != 0)
                         {
@@ -506,11 +507,14 @@ public partial class TradeUtils
                 {
                     LogMessage("⚠️ MOUSE MOVE BLOCKED: _allowMouseMovement is false (previous movement not completed)");
                 }
-                else if (!_windowWasClosedSinceLastMovement)
+                else
                 {
-                    LogMessage("⚠️ MOUSE MOVE BLOCKED: Window was not closed since last movement (preventing accidental purchases)");
-                }
-                else if (_allowMouseMovement && _windowWasClosedSinceLastMovement)
+                    bool hasTeleportedItemLocation = _teleportedItemLocation.X != 0 || _teleportedItemLocation.Y != 0;
+                    if (!_windowWasClosedSinceLastMovement && !hasTeleportedItemLocation)
+                    {
+                        LogMessage("⚠️ MOUSE MOVE BLOCKED: Window was not closed since last movement (preventing accidental purchases)");
+                    }
+                    else if (_allowMouseMovement && (_windowWasClosedSinceLastMovement || hasTeleportedItemLocation))
                 {
                     if (_teleportedItemLocation.X != 0 || _teleportedItemLocation.Y != 0)
                     {
@@ -538,6 +542,7 @@ public partial class TradeUtils
                     {
                         LogMessage("⚠️ NO ITEMS: No teleported item location or recent items available for mouse movement");
                     }
+                }
                 }
             }
             
@@ -1079,3 +1084,13 @@ public partial class TradeUtils
         }
     }
 }
+
+
+
+
+
+
+
+
+
+
