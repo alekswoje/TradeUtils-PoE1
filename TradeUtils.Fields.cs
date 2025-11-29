@@ -79,6 +79,9 @@ public partial class TradeUtils
     // When true, always perform auto-buy clicks regardless of LiveSearch AutoBuy setting (used by BulkBuy).
     private bool _forceAutoBuy = false;
     
+    // When true, Ctrl key is held down for BulkBuy operations (to avoid repeated press/release)
+    private bool _bulkBuyCtrlHeld = false;
+    
     // ==================== HELPER METHODS ====================
     
     /// <summary>
@@ -293,6 +296,8 @@ public partial class TradeUtils
     // Mouse event flags  
     private const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
     private const uint MOUSEEVENTF_LEFTUP = 0x0004;
+    private const uint MOUSEEVENTF_RIGHTDOWN = 0x0008;
+    private const uint MOUSEEVENTF_RIGHTUP = 0x0010;
 
     private string GetPoeSessionForRequests()
     {

@@ -40,6 +40,7 @@ public partial class TradeUtils
     private System.Threading.CancellationTokenSource _bulkBuyCts;
     private bool _lastBulkBuyStartHotkeyState = false;
     private bool _bulkBuyPausedForFocus = false;
+    private int _bulkBuyCurrencyFailureCount = 0;
     
     partial void InitializeBulkBuy()
     {
@@ -215,6 +216,8 @@ public partial class TradeUtils
             _currentBulkBuyItem = null;
             _bulkBuyRetryCount = 0;
             _totalSpent = 0;
+            _bulkBuyCurrencyFailureCount = 0;
+            _bulkBuyCtrlHeld = false;
             Settings.BulkBuy.TotalItemsProcessed = 0;
             Settings.BulkBuy.SuccessfulPurchases = 0;
             Settings.BulkBuy.FailedPurchases = 0;
@@ -252,9 +255,24 @@ public partial class TradeUtils
                 LogMessage("BulkBuy: Stop requested but not currently running");
             }
 
-            _bulkBuyInProgress = false;
+        _bulkBuyInProgress = false;
             _bulkBuyPausedForFocus = false;
             Settings.BulkBuy.IsRunning = false;
+
+            // Release Ctrl if it's being held
+            if (_bulkBuyCtrlHeld)
+            {
+                try
+                {
+                    keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+                    _bulkBuyCtrlHeld = false;
+                    LogMessage("BulkBuy: Released Ctrl key");
+                }
+                catch (Exception ex)
+                {
+                    LogError($"BulkBuy: Error releasing Ctrl key: {ex.Message}");
+                }
+            }
 
             try
             {
@@ -328,6 +346,21 @@ public partial class TradeUtils
         }
         finally
         {
+            // Always release Ctrl if it's being held
+            if (_bulkBuyCtrlHeld)
+            {
+                try
+                {
+                    keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+                    _bulkBuyCtrlHeld = false;
+                    LogMessage("BulkBuy: Released Ctrl key (loop ended)");
+                }
+                catch (Exception ex)
+                {
+                    LogError($"BulkBuy: Error releasing Ctrl key in finally: {ex.Message}");
+                }
+            }
+            
             _bulkBuyInProgress = false;
             Settings.BulkBuy.IsRunning = false;
         }
@@ -565,7 +598,22 @@ public partial class TradeUtils
                         return 0;
                     }
 
-                    foreach (var resultItem in fetchResponse.Result)
+                    // Group items by seller account name
+                    var itemsBySeller = fetchResponse.Result
+                        .Where(r => r.Listing?.Account != null && !string.IsNullOrEmpty(r.Listing.Account.Name))
+                        .GroupBy(r => r.Listing.Account.Name)
+                        .ToList();
+
+                    if (itemsBySeller.Count == 0)
+                    {
+                        LogMessage("BulkBuy: No items with valid seller accounts in batch.");
+                        return 0;
+                    }
+
+                    LogMessage($"BulkBuy: Processing {itemsBySeller.Count} seller(s) with {fetchResponse.Result.Length} total item(s)");
+
+                    // Process each seller's items
+                    foreach (var sellerGroup in itemsBySeller)
                     {
                         if (ct.IsCancellationRequested || !_bulkBuyInProgress)
                             break;
@@ -573,20 +621,25 @@ public partial class TradeUtils
                         if (purchasedInBatch >= remainingAllowed)
                             break;
 
-                        bool success = await ProcessFetchedBulkBuyItemAsync(resultItem, search, ct);
+                        if (_bulkBuyCurrencyFailureCount >= 2)
+                        {
+                            LogMessage("BulkBuy: Stopping due to currency failures (2 items failed to purchase after 5 attempts each).");
+                            StopBulkBuy();
+                            return purchasedInBatch;
+                        }
 
-                        if (success)
-                        {
-                            purchasedInBatch++;
-                            Settings.BulkBuy.TotalItemsProcessed++;
-                            Settings.BulkBuy.SuccessfulPurchases++;
-                            Settings.BulkBuy.CurrentItemIndex++;
-                        }
-                        else
-                        {
-                            Settings.BulkBuy.TotalItemsProcessed++;
-                            Settings.BulkBuy.FailedPurchases++;
-                        }
+                        int purchasedFromSeller = await ProcessSellerItemsAsync(
+                            sellerGroup.Key,
+                            sellerGroup.ToList(),
+                            search,
+                            sessionId,
+                            remainingAllowed - purchasedInBatch,
+                            ct);
+
+                        purchasedInBatch += purchasedFromSeller;
+
+                        if (purchasedInBatch >= remainingAllowed)
+                            break;
                     }
 
                     return purchasedInBatch;
@@ -606,125 +659,413 @@ public partial class TradeUtils
     }
 
     /// <summary>
-    /// Takes a fetched ResultItem and performs teleport + (optional) auto-buy
-    /// using the existing LiveSearch teleport/mouse logic.
+    /// Processes all items from a single seller. Teleports once, then processes each item
+    /// by sending hideout tokens, waiting for purchase window, and attempting to buy.
     /// </summary>
-    private async Task<bool> ProcessFetchedBulkBuyItemAsync(
-        ResultItem itemModel,
+    private async Task<int> ProcessSellerItemsAsync(
+        string sellerAccountName,
+        List<ResultItem> sellerItems,
         BulkBuySearch search,
+        string sessionId,
+        int remainingAllowed,
+        System.Threading.CancellationToken ct)
+    {
+        int purchasedFromSeller = 0;
+        bool firstItem = true;
+
+        try
+        {
+            LogMessage($"BulkBuy: Processing {sellerItems.Count} item(s) from seller '{sellerAccountName}'");
+
+            foreach (var itemModel in sellerItems)
+            {
+                if (ct.IsCancellationRequested || !_bulkBuyInProgress)
+                    break;
+
+                if (purchasedFromSeller >= remainingAllowed)
+                    break;
+
+                if (_bulkBuyCurrencyFailureCount >= 2)
+                {
+                    LogMessage("BulkBuy: Stopping due to currency failures.");
+                    StopBulkBuy();
+                    return purchasedFromSeller;
+                }
+
+                var listing = itemModel.Listing;
+                var poeItem = itemModel.Item;
+
+                if (listing == null || poeItem == null)
+                {
+                    LogMessage($"BulkBuy: Incomplete listing for item {itemModel.Id}, skipping.");
+                    continue;
+                }
+
+                string name = string.IsNullOrEmpty(poeItem.Name) ? poeItem.TypeLine : poeItem.Name;
+                string priceStr = listing.Price != null
+                    ? $"{listing.Price.Amount} {listing.Price.Currency}"
+                    : "Unknown";
+
+                LogMessage($"BulkBuy: Preparing to buy '{name}' for {priceStr} at ({listing.Stash?.X},{listing.Stash?.Y})");
+
+                var bulkItem = new BulkBuyItem
+                {
+                    Name = name,
+                    Price = priceStr,
+                    HideoutToken = listing.HideoutToken,
+                    ItemId = itemModel.Id,
+                    SearchId = search.SearchId.Value,
+                    AccountName = sellerAccountName,
+                    IsOnline = listing.Account?.Online != null,
+                    X = listing.Stash?.X ?? 0,
+                    Y = listing.Stash?.Y ?? 0,
+                    AddedTime = DateTime.Now,
+                    Status = "Pending"
+                };
+
+                _currentBulkBuyItem = bulkItem;
+
+                bool success = false;
+
+                if (firstItem)
+                {
+                    // First item: use full teleport
+                    LogMessage($"BulkBuy: Teleporting to seller '{sellerAccountName}' for item '{bulkItem.Name}'");
+                    
+                    // Press and hold Ctrl for the entire seller session
+                    if (!_bulkBuyCtrlHeld)
+                    {
+                        keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYDOWN, UIntPtr.Zero);
+                        _bulkBuyCtrlHeld = true;
+                        await Task.Delay(50, ct); // Wait for Ctrl to register
+                        LogMessage("BulkBuy: Pressed and holding Ctrl for seller session");
+                    }
+                    
+                    var (issuedAt, expiresAt) = RecentItem.ParseTokenTimes(bulkItem.HideoutToken);
+                    var recent = new RecentItem
+                    {
+                        Name = bulkItem.Name,
+                        Price = bulkItem.Price,
+                        HideoutToken = bulkItem.HideoutToken,
+                        ItemId = bulkItem.ItemId,
+                        SearchId = bulkItem.SearchId,
+                        X = bulkItem.X,
+                        Y = bulkItem.Y,
+                        AddedTime = bulkItem.AddedTime,
+                        TokenIssuedAt = issuedAt,
+                        TokenExpiresAt = expiresAt
+                    };
+
+                    lock (_recentItemsLock)
+                    {
+                        _recentItems.Enqueue(recent);
+                    }
+
+                    _allowMouseMovement = true;
+                    _windowWasClosedSinceLastMovement = true;
+                    _forceAutoBuy = true;
+                    _lastTeleportSucceeded = false;
+                    TravelToHideout(isManual: false);
+
+                    // Wait for teleport to complete
+                    int teleportWaitMs = 0;
+                    while (!_lastTeleportSucceeded && teleportWaitMs < 5000 && !ct.IsCancellationRequested && _bulkBuyInProgress)
+                    {
+                        await Task.Delay(100, ct);
+                        teleportWaitMs += 100;
+                    }
+
+                    if (!_lastTeleportSucceeded)
+                    {
+                        LogMessage($"BulkBuy: Teleport for item {itemModel.Id} did not succeed, treating as failed.");
+                        Settings.BulkBuy.TotalItemsProcessed++;
+                        Settings.BulkBuy.FailedPurchases++;
+                        continue;
+                    }
+
+                    firstItem = false;
+                }
+                else
+                {
+                    // Subsequent items: send hideout token to switch tabs
+                    LogMessage($"BulkBuy: Sending hideout token for item '{bulkItem.Name}' to switch to correct tab");
+                    
+                    // Create RecentItem for MoveMouseToItemLocation to find
+                    var (issuedAt, expiresAt) = RecentItem.ParseTokenTimes(bulkItem.HideoutToken);
+                    var recent = new RecentItem
+                    {
+                        Name = bulkItem.Name,
+                        Price = bulkItem.Price,
+                        HideoutToken = bulkItem.HideoutToken,
+                        ItemId = bulkItem.ItemId,
+                        SearchId = bulkItem.SearchId,
+                        X = bulkItem.X,
+                        Y = bulkItem.Y,
+                        AddedTime = bulkItem.AddedTime,
+                        TokenIssuedAt = issuedAt,
+                        TokenExpiresAt = expiresAt
+                    };
+                    
+                    // Set teleported item info so MoveMouseToItemLocation can find it
+                    _teleportedItemInfo = recent;
+                    
+                    bool tokenSent = await SendHideoutTokenForItemAsync(bulkItem, sessionId, ct);
+                    if (!tokenSent)
+                    {
+                        LogMessage($"BulkBuy: Failed to send hideout token for item {itemModel.Id}, skipping.");
+                        Settings.BulkBuy.TotalItemsProcessed++;
+                        Settings.BulkBuy.FailedPurchases++;
+                        _teleportedItemInfo = null;
+                        continue;
+                    }
+
+                    // Wait for tab switch (150-250ms)
+                    await Task.Delay(200, ct);
+                }
+
+                // Wait for purchase window to open (max 3 seconds)
+                bool windowOpened = await WaitForPurchaseWindowAsync(3000, ct);
+                if (!windowOpened)
+                {
+                    LogMessage($"BulkBuy: Purchase window did not open within 3 seconds for item '{bulkItem.Name}', skipping.");
+                    Settings.BulkBuy.TotalItemsProcessed++;
+                    Settings.BulkBuy.FailedPurchases++;
+                    continue;
+                }
+
+                // Try to buy the item (up to 5 attempts)
+                success = await TryBuyItemWithRetriesAsync(bulkItem, 5, ct);
+
+                if (success)
+                {
+                    purchasedFromSeller++;
+                    Settings.BulkBuy.TotalItemsProcessed++;
+                    Settings.BulkBuy.SuccessfulPurchases++;
+                    Settings.BulkBuy.CurrentItemIndex++;
+                    _currentBulkBuyItem.Status = "Completed";
+                    _teleportedItemInfo = null; // Clear after successful purchase
+
+                    if (listing.Price != null)
+                    {
+                        _totalSpent += listing.Price.Amount;
+                    }
+                }
+                else
+                {
+                    Settings.BulkBuy.TotalItemsProcessed++;
+                    Settings.BulkBuy.FailedPurchases++;
+                    _bulkBuyCurrencyFailureCount++;
+                    _teleportedItemInfo = null; // Clear after failed purchase
+                    LogMessage($"BulkBuy: Failed to buy '{bulkItem.Name}' after 5 attempts (currency failure count: {_bulkBuyCurrencyFailureCount}/2)");
+                }
+            }
+
+            // Release Ctrl when done with this seller
+            if (_bulkBuyCtrlHeld)
+            {
+                try
+                {
+                    keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+                    _bulkBuyCtrlHeld = false;
+                    LogMessage("BulkBuy: Released Ctrl key (done with seller)");
+                }
+                catch (Exception ex)
+                {
+                    LogError($"BulkBuy: Error releasing Ctrl key: {ex.Message}");
+                }
+            }
+
+            return purchasedFromSeller;
+        }
+        catch (OperationCanceledException)
+        {
+            LogMessage($"BulkBuy: Seller '{sellerAccountName}' processing cancelled.");
+            return purchasedFromSeller;
+        }
+        catch (Exception ex)
+        {
+            LogError($"BulkBuy: Error processing seller '{sellerAccountName}' - {ex.Message}");
+            return purchasedFromSeller;
+        }
+    }
+
+    /// <summary>
+    /// Sends a hideout token to switch to the correct tab for an item (used when already in hideout).
+    /// </summary>
+    private async Task<bool> SendHideoutTokenForItemAsync(
+        BulkBuyItem item,
+        string sessionId,
         System.Threading.CancellationToken ct)
     {
         try
         {
-            if (ct.IsCancellationRequested || !_bulkBuyInProgress)
-                return false;
-
-            var listing = itemModel.Listing;
-            var poeItem = itemModel.Item;
-
-            if (listing == null || poeItem == null)
+            if (_rateLimiter != null && !_rateLimiter.CanMakeRequest())
             {
-                LogMessage($"BulkBuy: Incomplete listing for item {itemModel.Id}, skipping.");
-                return false;
+                LogMessage($"BulkBuy: Quota too low before sending hideout token - {_rateLimiter.GetStatus()}");
+                int waitMs = _rateLimiter.GetTimeUntilReset();
+                if (waitMs > 0)
+                {
+                    await Task.Delay(Math.Min(waitMs, 30_000), ct);
+                }
             }
 
-            string name = string.IsNullOrEmpty(poeItem.Name) ? poeItem.TypeLine : poeItem.Name;
-            string priceStr = listing.Price != null
-                ? $"{listing.Price.Amount} {listing.Price.Currency}"
-                : "Unknown";
-
-            LogMessage($"BulkBuy: Preparing to buy '{name}' for {priceStr} at ({listing.Stash?.X},{listing.Stash?.Y})");
-
-            // Build BulkBuyItem and translate to RecentItem so we can reuse
-            // existing teleport + auto-buy pipeline.
-            var bulkItem = new BulkBuyItem
+            var request = new HttpRequestMessage(HttpMethod.Post, "https://www.pathofexile.com/api/trade/whisper")
             {
-                Name = name,
-                Price = priceStr,
-                HideoutToken = listing.HideoutToken,
-                ItemId = itemModel.Id,
-                SearchId = search.SearchId.Value,
-                AccountName = listing.Account?.Name ?? "",
-                IsOnline = listing.Account?.Online != null,
-                X = listing.Stash?.X ?? 0,
-                Y = listing.Stash?.Y ?? 0,
-                AddedTime = DateTime.Now,
-                Status = "Pending"
+                Content = new StringContent($"{{ \"token\": \"{item.HideoutToken}\", \"continue\": true }}", Encoding.UTF8, "application/json")
             };
 
-            _currentBulkBuyItem = bulkItem;
+            request.Headers.Add("Cookie", $"POESESSID={sessionId}");
+            request.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36");
+            request.Headers.Add("Accept", "*/*");
+            request.Headers.Add("Accept-Encoding", "gzip, deflate, br, zstd");
+            request.Headers.Add("Accept-Language", "en-US,en;q=0.9");
+            request.Headers.Add("Priority", "u=1, i");
+            request.Headers.Add("Referer", "https://www.pathofexile.com/trade/search/Keepers");
+            request.Headers.Add("X-Requested-With", "XMLHttpRequest");
 
-            // TODO: hook in proper gold check once we have a reliable method.
-            // For now, we assume the player can afford it.
-
-            // Push into recent items queue and use teleport/auto-buy logic.
-            var (issuedAt, expiresAt) = RecentItem.ParseTokenTimes(bulkItem.HideoutToken);
-            var recent = new RecentItem
+            using (var response = await _httpClient.SendAsync(request, ct))
             {
-                Name = bulkItem.Name,
-                Price = bulkItem.Price,
-                HideoutToken = bulkItem.HideoutToken,
-                ItemId = bulkItem.ItemId,
-                SearchId = bulkItem.SearchId,
-                X = bulkItem.X,
-                Y = bulkItem.Y,
-                AddedTime = bulkItem.AddedTime,
-                TokenIssuedAt = issuedAt,
-                TokenExpiresAt = expiresAt
-            };
+                if (_rateLimiter != null)
+                {
+                    await _rateLimiter.HandleRateLimitResponse(response);
+                }
 
-            lock (_recentItemsLock)
-            {
-                _recentItems.Enqueue(recent);
+                if (!response.IsSuccessStatusCode)
+                {
+                    string err = await response.Content.ReadAsStringAsync();
+                    LogError($"BulkBuy: Hideout token request failed for item '{item.Name}' - {response.StatusCode}: {err}");
+                    return false;
+                }
+
+                var responseContent = await response.Content.ReadAsStringAsync();
+                bool success = !responseContent.Contains("\"error\"") && 
+                              (responseContent.Contains("\"success\"") || response.StatusCode == System.Net.HttpStatusCode.OK);
+
+                if (success)
+                {
+                    LogMessage($"BulkBuy: Hideout token sent successfully for item '{item.Name}'");
+                }
+                else
+                {
+                    LogError($"BulkBuy: Hideout token response indicates failure: {responseContent}");
+                }
+
+                return success;
             }
-
-            LogMessage($"BulkBuy: Teleporting to seller '{bulkItem.AccountName}' for item '{bulkItem.Name}'");
-
-            _allowMouseMovement = true;
-            _windowWasClosedSinceLastMovement = true;
-
-            _forceAutoBuy = true;
-            _lastTeleportSucceeded = false;
-            TravelToHideout(isManual: false);
-
-            int timeoutSec = Settings.BulkBuy.TimeoutPerItem.Value;
-            DateTime startWait = DateTime.Now;
-
-            while (!ct.IsCancellationRequested &&
-                   (DateTime.Now - startWait).TotalSeconds < timeoutSec)
-            {
-                await Task.Delay(250, ct);
-            }
-
-            _forceAutoBuy = false;
-
-            if (!_lastTeleportSucceeded)
-            {
-                LogMessage($"BulkBuy: Teleport for item {itemModel.Id} did not succeed, treating as failed.");
-                return false;
-            }
-
-            _currentBulkBuyItem.Status = "Completed";
-
-            // Update spent counter if we have a numeric amount
-            if (listing.Price != null)
-            {
-                _totalSpent += listing.Price.Amount;
-            }
-
-            return true;
-        }
-        catch (OperationCanceledException)
-        {
-            LogMessage($"BulkBuy: Item {itemModel.Id} processing cancelled.");
-            return false;
         }
         catch (Exception ex)
         {
-            LogError($"BulkBuy: Error while processing item {itemModel.Id} - {ex.Message}");
+            LogError($"BulkBuy: Error sending hideout token for item '{item.Name}' - {ex.Message}");
             return false;
         }
     }
+
+    /// <summary>
+    /// Waits for the purchase window to become visible, with a maximum timeout.
+    /// </summary>
+    private async Task<bool> WaitForPurchaseWindowAsync(int timeoutMs, System.Threading.CancellationToken ct)
+    {
+        DateTime startTime = DateTime.Now;
+        while ((DateTime.Now - startTime).TotalMilliseconds < timeoutMs && !ct.IsCancellationRequested && _bulkBuyInProgress)
+        {
+            try
+            {
+                var purchaseWindow = GameController.IngameState.IngameUi.PurchaseWindowHideout;
+                if (purchaseWindow != null && purchaseWindow.IsVisible)
+                {
+                    return true;
+                }
+            }
+            catch
+            {
+                // Ignore exceptions during window check
+            }
+
+            await Task.Delay(100, ct);
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Attempts to buy an item with retries. Returns true if successful, false if all attempts failed.
+    /// </summary>
+    private async Task<bool> TryBuyItemWithRetriesAsync(
+        BulkBuyItem item,
+        int maxAttempts,
+        System.Threading.CancellationToken ct)
+    {
+        for (int attempt = 1; attempt <= maxAttempts; attempt++)
+        {
+            if (ct.IsCancellationRequested || !_bulkBuyInProgress)
+                return false;
+
+            string sigBefore = GetInventorySignature();
+            if (string.IsNullOrEmpty(sigBefore))
+            {
+                LogMessage($"BulkBuy: Could not get inventory signature before attempt {attempt}, retrying...");
+                await Task.Delay(500, ct);
+                continue;
+            }
+
+            // Move mouse and click (MoveMouseToItemLocation handles clicking and second-click logic internally)
+            _forceAutoBuy = true;
+            _allowMouseMovement = true;
+            _windowWasClosedSinceLastMovement = true;
+            MoveMouseToItemLocation(item.X, item.Y);
+
+            // Wait for MoveMouseToItemLocation to complete its work (it waits 1s for second click if needed)
+            // So we wait 2.5s total to ensure both clicks and inventory update have time
+            await Task.Delay(2500, ct);
+
+            // Check multiple indicators of purchase success/failure
+            bool purchased = false;
+            for (int check = 0; check < 3; check++)
+            {
+                // Check 1: Inventory signature changed (item added to inventory)
+                string sigAfter = GetInventorySignature();
+                if (sigAfter != sigBefore)
+                {
+                    LogMessage($"BulkBuy: Successfully bought '{item.Name}' on attempt {attempt} (inventory changed)");
+                    _forceAutoBuy = false;
+                    return true;
+                }
+
+                // Check 2: Item is on cursor (indicates failed purchase - item was picked up but not bought)
+                if (IsItemOnCursor())
+                {
+                    LogMessage($"BulkBuy: Item '{item.Name}' is on cursor after click, purchase failed. Dropping item...");
+                    await DropItemFromCursorAsync();
+                    // Continue to next check - this attempt failed
+                    continue;
+                }
+
+                // Check 3: Item no longer exists in stash (purchase successful)
+                if (!IsItemStillInStash(item.X, item.Y))
+                {
+                    LogMessage($"BulkBuy: Successfully bought '{item.Name}' on attempt {attempt} (item no longer in stash)");
+                    _forceAutoBuy = false;
+                    return true;
+                }
+
+                if (check < 2)
+                {
+                    await Task.Delay(500, ct);
+                }
+            }
+
+            LogMessage($"BulkBuy: Attempt {attempt}/{maxAttempts} failed for '{item.Name}' (inventory unchanged)");
+            
+            if (attempt < maxAttempts)
+            {
+                await Task.Delay(500, ct); // Brief delay before retry
+            }
+        }
+
+        _forceAutoBuy = false;
+        return false;
+    }
+
 }
 
 // BulkBuy item model

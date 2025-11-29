@@ -27,6 +27,24 @@ public partial class TradeUtils
                 // Save window position
                 Settings.BulkBuy.WindowPosition = ImGui.GetWindowPos();
 
+                // Close button in top right
+                float windowWidth = ImGui.GetWindowWidth();
+                float buttonWidth = 80;
+                ImGui.SetCursorPosX(windowWidth - buttonWidth - ImGui.GetStyle().WindowPadding.X);
+                ImGui.SetCursorPosY(ImGui.GetStyle().WindowPadding.Y);
+                
+                if (ImGui.Button("Close", new Vector2(buttonWidth, 0)))
+                {
+                    if (_bulkBuyInProgress)
+                    {
+                        StopBulkBuy();
+                    }
+                    Settings.BulkBuy.ShowGui.Value = false;
+                }
+
+                ImGui.Spacing();
+                ImGui.Spacing();
+
                 // Title and status
                 ImGui.TextColored(new Vector4(0.3f, 0.7f, 1.0f, 1.0f), "=== Bulk Item Buyer ===");
                 ImGui.Spacing();

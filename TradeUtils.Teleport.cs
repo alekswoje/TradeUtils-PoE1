@@ -1,11 +1,13 @@
 using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.Linq;
 using System.Net.Http;
 using System.Text;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 using ExileCore.PoEMemory.MemoryObjects;
+using ExileCore.Shared.Enums;
 using Newtonsoft.Json;
 using NAudio.Wave;
 using System.Media;
@@ -453,32 +455,135 @@ public partial class TradeUtils
             // Small delay to ensure mouse position is set
             await Task.Delay(50);
             
-            // Press Ctrl key down
-            keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYDOWN, UIntPtr.Zero);
+            // For BulkBuy, Ctrl is already held - just perform the click
+            bool ctrlAlreadyHeld = _bulkBuyCtrlHeld;
             
-            // Small delay
-            await Task.Delay(10);
+            if (!ctrlAlreadyHeld)
+            {
+                // Press Ctrl key down and hold it
+                keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYDOWN, UIntPtr.Zero);
+                
+                // Longer delay to ensure Ctrl is registered
+                await Task.Delay(30);
+            }
             
             // Perform left mouse button down
             mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, UIntPtr.Zero);
             
             // Small delay
-            await Task.Delay(10);
+            await Task.Delay(20);
             
             // Perform left mouse button up
             mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, UIntPtr.Zero);
             
-            // Small delay
-            await Task.Delay(10);
-            
-            // Release Ctrl key
-            keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+            // Small delay before releasing Ctrl (only if we pressed it)
+            if (!ctrlAlreadyHeld)
+            {
+                await Task.Delay(30);
+                
+                // Release Ctrl key
+                keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+            }
             
             LogInfo("✅ AUTO BUY: Ctrl+Left Click completed!");
         }
         catch (Exception ex)
         {
             LogError($"❌ AUTO BUY FAILED: {ex.Message}");
+            // Make sure to release Ctrl if there was an error (only if we pressed it)
+            if (!_bulkBuyCtrlHeld)
+            {
+                try
+                {
+                    keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+                }
+                catch { }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Checks if there's an item on the cursor (indicates a failed purchase attempt).
+    /// </summary>
+    private bool IsItemOnCursor()
+    {
+        try
+        {
+            var playerInventories = GameController?.Game?.IngameState?.ServerData?.PlayerInventories;
+            if (playerInventories == null) return false;
+            
+            foreach (var pi in playerInventories)
+            {
+                if (pi?.Inventory?.InventType == InventoryTypeE.Cursor)
+                {
+                    return pi.Inventory?.Items != null && pi.Inventory.Items.Count > 0;
+                }
+            }
+            
+            return false;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Drops an item from the cursor by right-clicking.
+    /// </summary>
+    private async Task DropItemFromCursorAsync()
+    {
+        try
+        {
+            mouse_event(MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, UIntPtr.Zero);
+            await Task.Delay(10);
+            mouse_event(MOUSEEVENTF_RIGHTUP, 0, 0, 0, UIntPtr.Zero);
+            await Task.Delay(200);
+        }
+        catch (Exception ex)
+        {
+            LogError($"Error dropping item from cursor: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Checks if an item still exists at the given stash coordinates (indicates purchase failed).
+    /// Uses server-side inventory data which has PosX/PosY properties.
+    /// </summary>
+    private bool IsItemStillInStash(int x, int y)
+    {
+        try
+        {
+            var purchaseWindow = GameController.IngameState.IngameUi.PurchaseWindowHideout;
+            if (purchaseWindow == null || !purchaseWindow.IsVisible)
+                return false;
+
+            // Check server-side NPC inventories (seller's stash)
+            var npcInventories = GameController?.Game?.IngameState?.ServerData?.NPCInventories;
+            if (npcInventories == null)
+                return false;
+
+            // Find the seller's stash inventory
+            foreach (var npcInv in npcInventories)
+            {
+                if (npcInv?.Inventory?.InventorySlotItems == null)
+                    continue;
+
+                // Check if there's an item at the specified coordinates
+                foreach (var slotItem in npcInv.Inventory.InventorySlotItems)
+                {
+                    if (slotItem != null && slotItem.PosX == x && slotItem.PosY == y)
+                    {
+                        return true;
+                    }
+                }
+            }
+            
+            return false;
+        }
+        catch
+        {
+            return false;
         }
     }
 
@@ -536,6 +641,16 @@ public partial class TradeUtils
             
             LogDebug($"Moved mouse to item location: Stash({x},{y}) -> Screen({finalX},{finalY}) - Panel size: {rect.Width}x{rect.Height}");
             
+            // Wait for mouse to settle and tooltip to appear (especially important for BulkBuy)
+            if (_forceAutoBuy)
+            {
+                await Task.Delay(500); // Wait longer for BulkBuy to ensure tooltip is ready
+            }
+            else
+            {
+                await Task.Delay(200); // Shorter wait for LiveSearch
+            }
+            
             // Auto Buy: for BulkBuy we always click, for LiveSearch respect its AutoBuy setting
             if (!_forceAutoBuy && !Settings.LiveSearch.AutoFeatures.AutoBuy.Value)
             {
@@ -577,6 +692,17 @@ public partial class TradeUtils
 
             LogMessage("⏳ AUTO BUY DELAY: Waiting 100ms before click...");
             await Task.Delay(100);
+
+            // For BulkBuy, verify the item via clipboard before clicking
+            if (_forceAutoBuy && itemBeingProcessed != null)
+            {
+                bool verified = await VerifyItemFromClipboardAsync(itemBeingProcessed.Name, itemBeingProcessed.Price, maxRetries: 3);
+                if (!verified)
+                {
+                    LogMessage($"⚠️ BULKBUY VERIFICATION FAILED: Item at ({x},{y}) verification failed after retries. Proceeding with click anyway (may be tooltip delay).");
+                    // Don't return - allow click to proceed but log warning
+                }
+            }
 
             LogMessage("🖱️ AUTO BUY CLICK: Performing Ctrl+Left Click");
             await PerformCtrlLeftClickAsync();
@@ -817,6 +943,159 @@ public partial class TradeUtils
             LogMessage($"❌ NO ITEM FOUND for coordinates ({x}, {y})");
         }
         return null;
+    }
+
+    /// <summary>
+    /// Verifies the item at mouse cursor by copying to clipboard (Ctrl+C) and checking the Note (price) and item name.
+    /// </summary>
+    private async Task<bool> VerifyItemFromClipboardAsync(string expectedItemName, string expectedPrice, int maxRetries = 3)
+    {
+        for (int retry = 1; retry <= maxRetries; retry++)
+        {
+            try
+            {
+                // Send Ctrl+C to copy item info
+                // For BulkBuy, Ctrl is already held - just press C
+                bool ctrlAlreadyHeld = _bulkBuyCtrlHeld;
+                
+                if (!ctrlAlreadyHeld)
+                {
+                    keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYDOWN, UIntPtr.Zero);
+                    await Task.Delay(50);
+                }
+                
+                keybd_event(0x43, 0, KEYEVENTF_KEYDOWN, UIntPtr.Zero); // C key
+                await Task.Delay(50);
+                keybd_event(0x43, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+                
+                if (!ctrlAlreadyHeld)
+                {
+                    keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+                }
+
+                // Wait for clipboard to update (longer wait for first attempt)
+                int waitTime = retry == 1 ? 400 : 200;
+                await Task.Delay(waitTime);
+
+                // Read clipboard using .NET Clipboard class
+                string clipboardText = "";
+                try
+                {
+                    clipboardText = System.Windows.Forms.Clipboard.GetText();
+                }
+                catch (Exception ex)
+                {
+                    if (retry < maxRetries)
+                    {
+                        LogDebug($"BulkBuy: Failed to read clipboard (attempt {retry}/{maxRetries}): {ex.Message}, retrying...");
+                        await Task.Delay(200);
+                        continue;
+                    }
+                    LogError($"BulkBuy: Failed to read clipboard after {maxRetries} attempts: {ex.Message}");
+                    return false;
+                }
+
+                if (string.IsNullOrWhiteSpace(clipboardText))
+                {
+                    if (retry < maxRetries)
+                    {
+                        LogDebug($"BulkBuy: Clipboard is empty (attempt {retry}/{maxRetries}), retrying...");
+                        await Task.Delay(200);
+                        continue;
+                    }
+                    LogMessage("BulkBuy: Clipboard is empty after all retries, verification failed.");
+                    return false;
+                }
+
+            LogDebug($"BulkBuy: Clipboard text length: {clipboardText.Length}");
+
+            // Check if item name is in clipboard (fuzzy match - just contains check)
+            if (!string.IsNullOrWhiteSpace(expectedItemName))
+            {
+                string expectedNameLower = expectedItemName.ToLowerInvariant();
+                string clipboardLower = clipboardText.ToLowerInvariant();
+                
+                if (!clipboardLower.Contains(expectedNameLower))
+                {
+                    LogMessage($"BulkBuy: Item name mismatch. Expected: '{expectedItemName}', Clipboard contains: '{clipboardText.Substring(0, Math.Min(100, clipboardText.Length))}...'");
+                    return false;
+                }
+                LogDebug($"BulkBuy: Item name verified: '{expectedItemName}' found in clipboard");
+            }
+
+            // Extract and verify price from Note line
+            if (!string.IsNullOrWhiteSpace(expectedPrice))
+            {
+                // Expected price format: "84 chaos" or "~b/o 1 divine" or "30 chaos"
+                // Note format in clipboard: "Note: ~b/o 1 divine" or "Note: 30 chaos"
+                string expectedPriceLower = expectedPrice.ToLowerInvariant().Trim();
+                
+                // Try to find Note line
+                string[] lines = clipboardText.Split(new[] { "\r\n", "\n", "\r" }, StringSplitOptions.None);
+                string noteLine = null;
+                foreach (var line in lines)
+                {
+                    if (line.Trim().StartsWith("Note:", StringComparison.OrdinalIgnoreCase))
+                    {
+                        noteLine = line.Trim();
+                        break;
+                    }
+                }
+
+                if (noteLine == null)
+                {
+                    LogMessage("BulkBuy: No 'Note:' line found in clipboard, cannot verify price.");
+                    return false;
+                }
+
+                // Extract price from note line (format: "Note: ~b/o 1 divine" or "Note: 30 chaos")
+                string noteContent = noteLine.Substring("Note:".Length).Trim();
+                
+                // Remove "~b/o" or "~price" prefixes if present
+                if (noteContent.StartsWith("~"))
+                {
+                    int spaceIndex = noteContent.IndexOf(' ');
+                    if (spaceIndex > 0)
+                    {
+                        noteContent = noteContent.Substring(spaceIndex).Trim();
+                    }
+                }
+
+                // Compare: expectedPrice might be "84 chaos" or "1 divine"
+                // noteContent might be "84 chaos" or "1 divine"
+                string noteContentLower = noteContent.ToLowerInvariant();
+                
+                // Check if the price matches (amount and currency)
+                bool priceMatches = noteContentLower == expectedPriceLower || 
+                                   noteContentLower.Contains(expectedPriceLower) ||
+                                   expectedPriceLower.Contains(noteContentLower);
+
+                if (!priceMatches)
+                {
+                    LogMessage($"BulkBuy: Price mismatch. Expected: '{expectedPrice}', Found in Note: '{noteContent}'");
+                    return false;
+                }
+
+                LogDebug($"BulkBuy: Price verified: '{expectedPrice}' matches Note: '{noteContent}'");
+            }
+
+                LogMessage("BulkBuy: Item verification passed (name and price match)");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                if (retry < maxRetries)
+                {
+                    LogDebug($"BulkBuy: Error verifying item (attempt {retry}/{maxRetries}): {ex.Message}, retrying...");
+                    await Task.Delay(200);
+                    continue;
+                }
+                LogError($"BulkBuy: Error verifying item from clipboard after {maxRetries} attempts: {ex.Message}");
+                return false;
+            }
+        }
+
+        return false;
     }
 }
 
