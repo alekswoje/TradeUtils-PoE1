@@ -8,6 +8,51 @@ namespace TradeUtils;
 
 public partial class TradeUtils
 {
+    /// <summary>
+    /// Applies timing preset values based on preset index (0=Slow, 1=Fast, 2=SuperFast)
+    /// </summary>
+    private void ApplyTimingPreset(int presetIndex)
+    {
+        switch (presetIndex)
+        {
+            case 0: // Slow - for slow PCs/load times
+                Settings.BulkBuy.MouseMoveDelay.Value = 150;
+                Settings.BulkBuy.PostClickDelay.Value = 300;
+                Settings.BulkBuy.HideoutTokenDelay.Value = 300;
+                Settings.BulkBuy.WindowCloseCheckInterval.Value = 100;
+                Settings.BulkBuy.LoadingCheckInterval.Value = 200;
+                Settings.BulkBuy.RetryDelay.Value = 500;
+                Settings.BulkBuy.TimeoutPerItem.Value = 5;
+                LogMessage("BulkBuy: Applied 'Slow' timing preset (for slow PCs/load times)");
+                break;
+                
+            case 1: // Fast - normal/default
+                Settings.BulkBuy.MouseMoveDelay.Value = 50;
+                Settings.BulkBuy.PostClickDelay.Value = 150;
+                Settings.BulkBuy.HideoutTokenDelay.Value = 150;
+                Settings.BulkBuy.WindowCloseCheckInterval.Value = 50;
+                Settings.BulkBuy.LoadingCheckInterval.Value = 100;
+                Settings.BulkBuy.RetryDelay.Value = 300;
+                Settings.BulkBuy.TimeoutPerItem.Value = 3;
+                LogMessage("BulkBuy: Applied 'Fast' timing preset (normal/default)");
+                break;
+                
+            case 2: // SuperFast - for fast PCs/SSD/quick load times
+                Settings.BulkBuy.MouseMoveDelay.Value = 25;
+                Settings.BulkBuy.PostClickDelay.Value = 100;
+                Settings.BulkBuy.HideoutTokenDelay.Value = 100;
+                Settings.BulkBuy.WindowCloseCheckInterval.Value = 25;
+                Settings.BulkBuy.LoadingCheckInterval.Value = 50;
+                Settings.BulkBuy.RetryDelay.Value = 200;
+                Settings.BulkBuy.TimeoutPerItem.Value = 2;
+                LogMessage("BulkBuy: Applied 'SuperFast' timing preset (for fast PCs/SSD)");
+                break;
+        }
+    }
+}
+
+public partial class TradeUtils
+{
     private void RenderBulkBuyGui()
     {
         // Always show GUI when BulkBuy is enabled
@@ -180,41 +225,73 @@ public partial class TradeUtils
 
                     ImGui.Spacing();
 
-                    // Delay settings
-                    int delay = Settings.BulkBuy.DelayBetweenPurchases.Value;
-                    if (ImGui.SliderInt("Delay (ms)##Delay", ref delay, 1000, 10000))
+                    // Timing Preset selector
+                    string[] presetNames = { "Slow", "Fast", "SuperFast" };
+                    string currentPresetStr = Settings.BulkBuy.TimingPreset?.Value ?? "Fast";
+                    int currentPreset = Array.IndexOf(presetNames, currentPresetStr);
+                    if (currentPreset < 0) currentPreset = 1; // Default to Fast if invalid
+                    
+                    if (ImGui.Combo("Timing Preset##TimingPreset", ref currentPreset, presetNames, presetNames.Length))
                     {
-                        Settings.BulkBuy.DelayBetweenPurchases.Value = delay;
+                        Settings.BulkBuy.TimingPreset.Value = presetNames[currentPreset];
+                        ApplyTimingPreset(currentPreset);
                     }
                     if (ImGui.IsItemHovered())
                     {
-                        ImGui.SetTooltip("Delay between purchases (human-like behavior)");
+                        ImGui.SetTooltip("Slow: For slow PCs/load times\nFast: Normal PC (default)\nSuperFast: Fast PC/SSD/quick load times");
                     }
 
-                    bool randomize = Settings.BulkBuy.RandomizeDelays.Value;
-                    if (ImGui.Checkbox("Randomize Delays##RandomizeDelays", ref randomize))
+                    ImGui.Spacing();
+                    ImGui.Separator();
+                    ImGui.Text("Advanced Timing (adjust if needed):");
+                    ImGui.Spacing();
+
+                    // Advanced timing controls
+                    int mouseMoveDelay = Settings.BulkBuy.MouseMoveDelay?.Value ?? 50;
+                    if (ImGui.SliderInt("Mouse Move Delay (ms)##MouseMove", ref mouseMoveDelay, 0, 500))
                     {
-                        Settings.BulkBuy.RandomizeDelays.Value = randomize;
+                        Settings.BulkBuy.MouseMoveDelay.Value = mouseMoveDelay;
                     }
                     if (ImGui.IsItemHovered())
                     {
-                        ImGui.SetTooltip("Add random variance to delays");
+                        ImGui.SetTooltip("Delay after moving mouse before clicking");
                     }
 
-                    if (Settings.BulkBuy.RandomizeDelays.Value)
+                    int postClickDelay = Settings.BulkBuy.PostClickDelay?.Value ?? 150;
+                    if (ImGui.SliderInt("Post-Click Delay (ms)##PostClick", ref postClickDelay, 50, 1000))
                     {
-                        int variance = Settings.BulkBuy.RandomDelayVariance.Value;
-                        if (ImGui.SliderInt("Variance (ms)##Variance", ref variance, 0, 3000))
-                        {
-                            Settings.BulkBuy.RandomDelayVariance.Value = variance;
-                        }
+                        Settings.BulkBuy.PostClickDelay.Value = postClickDelay;
+                    }
+                    if (ImGui.IsItemHovered())
+                    {
+                        ImGui.SetTooltip("Delay after clicking before checking purchase");
+                    }
+
+                    int tokenDelay = Settings.BulkBuy.HideoutTokenDelay?.Value ?? 150;
+                    if (ImGui.SliderInt("Hideout Token Delay (ms)##TokenDelay", ref tokenDelay, 50, 500))
+                    {
+                        Settings.BulkBuy.HideoutTokenDelay.Value = tokenDelay;
+                    }
+                    if (ImGui.IsItemHovered())
+                    {
+                        ImGui.SetTooltip("Delay after sending hideout token");
+                    }
+
+                    int retryDelay = Settings.BulkBuy.RetryDelay?.Value ?? 300;
+                    if (ImGui.SliderInt("Retry Delay (ms)##RetryDelay", ref retryDelay, 100, 1000))
+                    {
+                        Settings.BulkBuy.RetryDelay.Value = retryDelay;
+                    }
+                    if (ImGui.IsItemHovered())
+                    {
+                        ImGui.SetTooltip("Delay between retry attempts");
                     }
 
                     ImGui.Spacing();
 
                     // Timeout
                     int timeout = Settings.BulkBuy.TimeoutPerItem.Value;
-                    if (ImGui.SliderInt("Timeout (s)##Timeout", ref timeout, 5, 60))
+                    if (ImGui.SliderInt("Timeout (s)##Timeout", ref timeout, 1, 10))
                     {
                         Settings.BulkBuy.TimeoutPerItem.Value = timeout;
                     }

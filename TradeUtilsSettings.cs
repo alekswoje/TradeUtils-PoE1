@@ -800,6 +800,10 @@ public class BulkBuySubSettings
         TimingDelays = new BbTimingDelaysSubMenu(this);
         Safety = new BbSafetySubMenu(this);
         Logging = new BbLoggingSubMenu(this);
+        
+        // Initialize timing preset values (Fast preset by default)
+        TimingPreset = new ListNode();
+        TimingPreset.Value = "Fast"; // Default to Fast preset
     }
 
     // ===== MAIN SETTINGS =====
@@ -825,21 +829,38 @@ public class BulkBuySubSettings
     public HotkeyNode StopAllHotkey { get; set; } = new HotkeyNode(Keys.None);
 
     // ===== TIMING & DELAYS =====
-    [Menu("Delay Between Purchases (ms)", "Delay between each purchase attempt (human-like behavior)")]
+    [Menu("Timing Preset", "Choose preset: Slow (slow PC/load times), Fast (normal), SuperFast (fast PC/load times)")]
     [IgnoreMenu]
-    public RangeNode<int> DelayBetweenPurchases { get; set; } = new RangeNode<int>(3000, 1000, 10000);
-
-    [Menu("Randomize Delays", "Add random variance to delays (more human-like)")]
-    [IgnoreMenu]
-    public ToggleNode RandomizeDelays { get; set; } = new ToggleNode(true);
-
-    [Menu("Random Delay Variance (ms)", "Maximum random variance to add to delays")]
-    [IgnoreMenu]
-    public RangeNode<int> RandomDelayVariance { get; set; } = new RangeNode<int>(1000, 0, 3000);
+    public ListNode TimingPreset { get; set; } = new ListNode(); // Default to "Fast" (index 1)
 
     [Menu("Timeout Per Item (seconds)", "Max time to wait for purchase window before moving to next item")]
     [IgnoreMenu]
-    public RangeNode<int> TimeoutPerItem { get; set; } = new RangeNode<int>(15, 5, 60);
+    public RangeNode<int> TimeoutPerItem { get; set; } = new RangeNode<int>(3, 1, 10);
+
+    // ===== FINE-GRAINED TIMING CONTROLS =====
+    [Menu("Mouse Move Delay (ms)", "Delay after moving mouse before clicking (allows tooltip to appear)")]
+    [IgnoreMenu]
+    public RangeNode<int> MouseMoveDelay { get; set; } = new RangeNode<int>(50, 0, 500);
+
+    [Menu("Post-Click Delay (ms)", "Delay after clicking before checking if purchase succeeded")]
+    [IgnoreMenu]
+    public RangeNode<int> PostClickDelay { get; set; } = new RangeNode<int>(150, 50, 1000);
+
+    [Menu("Hideout Token Delay (ms)", "Delay after sending hideout token for tab switch")]
+    [IgnoreMenu]
+    public RangeNode<int> HideoutTokenDelay { get; set; } = new RangeNode<int>(150, 50, 500);
+
+    [Menu("Window Close Check Interval (ms)", "How often to check if old purchase window closed")]
+    [IgnoreMenu]
+    public RangeNode<int> WindowCloseCheckInterval { get; set; } = new RangeNode<int>(50, 25, 200);
+
+    [Menu("Loading Screen Check Interval (ms)", "How often to check if loading screen finished")]
+    [IgnoreMenu]
+    public RangeNode<int> LoadingCheckInterval { get; set; } = new RangeNode<int>(100, 50, 500);
+
+    [Menu("Retry Delay (ms)", "Delay between retry attempts when purchase fails")]
+    [IgnoreMenu]
+    public RangeNode<int> RetryDelay { get; set; } = new RangeNode<int>(300, 100, 1000);
 
     // ===== SAFETY & LIMITS =====
     [Menu("Auto-Resume After Rate Limit", "Automatically resume after rate limit cooldown")]
@@ -857,6 +878,10 @@ public class BulkBuySubSettings
     [Menu("Max Retries Per Item", "Maximum retry attempts per failed item")]
     [IgnoreMenu]
     public RangeNode<int> MaxRetriesPerItem { get; set; } = new RangeNode<int>(2, 0, 5);
+
+    [Menu("Stop After Failed Items", "Stop bulk buying after this many failed items (0 = disabled)")]
+    [IgnoreMenu]
+    public RangeNode<int> StopAfterFailedItems { get; set; } = new RangeNode<int>(0, 0, 20);
 
     // ===== LOGGING =====
     [Menu("Log Purchases to File", "Save purchase log to CSV file")]
@@ -916,10 +941,24 @@ public class BbTimingDelaysSubMenu
 {
     private readonly BulkBuySubSettings _p;
     public BbTimingDelaysSubMenu(BulkBuySubSettings p) { _p = p; }
-    [Menu("Delay Between Purchases (ms)")] public RangeNode<int> DelayBetweenPurchases => _p.DelayBetweenPurchases;
-    [Menu("Randomize Delays")] public ToggleNode RandomizeDelays => _p.RandomizeDelays;
-    [Menu("Random Delay Variance (ms)")] public RangeNode<int> RandomDelayVariance => _p.RandomDelayVariance;
-    [Menu("Timeout Per Item (seconds)")] public RangeNode<int> TimeoutPerItem => _p.TimeoutPerItem;
+    
+    [Menu("Timing Preset", "Choose preset: Slow (slow PC/load times), Fast (normal), SuperFast (fast PC/load times)")]
+    public ListNode TimingPreset => _p.TimingPreset;
+    
+    [Menu("Timeout Per Item (seconds)", "Max time to wait for purchase window to open before skipping item")] 
+    public RangeNode<int> TimeoutPerItem => _p.TimeoutPerItem;
+    [Menu("Mouse Move Delay (ms)", "Delay after moving mouse before clicking (allows tooltip to appear). Default: 100ms")] 
+    public RangeNode<int> MouseMoveDelay => _p.MouseMoveDelay;
+    [Menu("Post-Click Delay (ms)", "Delay after clicking before checking if purchase succeeded. Default: 250ms")] 
+    public RangeNode<int> PostClickDelay => _p.PostClickDelay;
+    [Menu("Hideout Token Delay (ms)", "Delay after sending hideout token for tab switch. Default: 200ms")] 
+    public RangeNode<int> HideoutTokenDelay => _p.HideoutTokenDelay;
+    [Menu("Window Close Check Interval (ms)", "How often to check if old purchase window closed. Default: 100ms")] 
+    public RangeNode<int> WindowCloseCheckInterval => _p.WindowCloseCheckInterval;
+    [Menu("Loading Screen Check Interval (ms)", "How often to check if loading screen finished. Default: 200ms")] 
+    public RangeNode<int> LoadingCheckInterval => _p.LoadingCheckInterval;
+    [Menu("Retry Delay (ms)", "Delay between retry attempts when purchase fails. Default: 500ms")] 
+    public RangeNode<int> RetryDelay => _p.RetryDelay;
 }
 
 public class BbSafetySubMenu
@@ -930,6 +969,8 @@ public class BbSafetySubMenu
     [Menu("Stop on Error")] public ToggleNode StopOnError => _p.StopOnError;
     [Menu("Retry Failed Items")] public ToggleNode RetryFailedItems => _p.RetryFailedItems;
     [Menu("Max Retries Per Item")] public RangeNode<int> MaxRetriesPerItem => _p.MaxRetriesPerItem;
+    [Menu("Stop After Failed Items", "Stop bulk buying after this many failed items (0 = disabled)")] 
+    public RangeNode<int> StopAfterFailedItems => _p.StopAfterFailedItems;
 }
 
 public class BbLoggingSubMenu

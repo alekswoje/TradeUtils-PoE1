@@ -57,6 +57,13 @@ public partial class TradeUtils : BaseSettingsPlugin<TradeUtilsSettings>
         {
             LogMessage("Initializing BulkBuy...");
             InitializeBulkBuy();
+            
+            // Apply timing preset on initialization
+            string presetStr = Settings.BulkBuy.TimingPreset?.Value ?? "Fast";
+            string[] presetNames = { "Slow", "Fast", "SuperFast" };
+            int presetIndex = Array.IndexOf(presetNames, presetStr);
+            if (presetIndex < 0) presetIndex = 1; // Default to Fast if invalid
+            ApplyTimingPreset(presetIndex);
         }
         else
         {
