@@ -2,6 +2,7 @@ using System;
 using System.Numerics;
 using System.Linq;
 using ImGuiNET;
+using ExileCore.Shared.Nodes;
 
 namespace TradeUtils;
 
@@ -30,7 +31,6 @@ public partial class TradeUtils
                 ImGui.TextColored(new Vector4(0.3f, 0.7f, 1.0f, 1.0f), "=== Bulk Item Buyer ===");
                 ImGui.Spacing();
 
-                // Status indicator
                 if (_bulkBuyInProgress)
                 {
                     ImGui.TextColored(new Vector4(0.0f, 1.0f, 0.0f, 1.0f), "RUNNING");
@@ -45,12 +45,11 @@ public partial class TradeUtils
                 ImGui.Separator();
                 ImGui.Spacing();
 
-                // Groups info
-                int enabledGroups = Settings.BulkBuy.Groups.Count(g => g.Enable.Value);
-                int enabledSearches = Settings.BulkBuy.Groups.SelectMany(g => g.Searches).Count(s => s.Enable.Value);
+                int totalGroups = Settings.BulkBuy.Groups.Count;
+                int activeSearches = Settings.BulkBuy.Groups.SelectMany(g => g.Searches).Count(s => s.Enable.Value);
                 
-                ImGui.Text($"Enabled Groups: {enabledGroups}");
-                ImGui.Text($"Enabled Searches: {enabledSearches}");
+                ImGui.Text($"Groups: {totalGroups}");
+                ImGui.Text($"Active Searches: {activeSearches}");
                 if (ImGui.IsItemHovered())
                 {
                     ImGui.SetTooltip("Configure groups and searches in BulkBuy Settings");
@@ -63,7 +62,7 @@ public partial class TradeUtils
                 {
                     if (ImGui.Button("Start Bulk Buy", new Vector2(150, 30)))
                     {
-                        if (enabledSearches > 0)
+                        if (activeSearches > 0)
                         {
                             StartBulkBuy();
                         }
@@ -74,9 +73,9 @@ public partial class TradeUtils
                     }
 
                     ImGui.SameLine();
-                    if (enabledSearches > 0)
+                    if (activeSearches > 0)
                     {
-                        ImGui.TextColored(new Vector4(0.0f, 1.0f, 0.0f, 1.0f), $"Ready to buy from {enabledSearches} searches");
+                        ImGui.TextColored(new Vector4(0.0f, 1.0f, 0.0f, 1.0f), $"Ready to buy from {activeSearches} searches");
                     }
                     else
                     {
@@ -105,11 +104,11 @@ public partial class TradeUtils
                 ImGui.Separator();
                 ImGui.Spacing();
 
-                // Statistics
                 ImGui.Text("Statistics:");
                 ImGui.Indent();
                 
-                ImGui.Text($"Queue: {_bulkBuyQueue.Count} items remaining");
+                int inQueue = _bulkBuyQueue.Count;
+                ImGui.Text($"Queue: {inQueue} items remaining");
                 ImGui.Text($"Processed: {Settings.BulkBuy.TotalItemsProcessed}");
                 ImGui.Text($"Successful: {Settings.BulkBuy.SuccessfulPurchases}");
                 ImGui.Text($"Failed: {Settings.BulkBuy.FailedPurchases}");
@@ -119,6 +118,15 @@ public partial class TradeUtils
                 {
                     var elapsed = DateTime.Now - _bulkBuyStartTime;
                     ImGui.Text($"Time: {elapsed.TotalSeconds:F0}s");
+
+                    // Simple status line
+                    string status = _waitingForPurchaseWindow ? "Waiting for purchase window" : "Processing";
+                    ImGui.Text($"Status: {status}");
+                    ImGui.Text($"Items Remaining (approx): {inQueue}");
+                }
+                else
+                {
+                    ImGui.Text("Status: Idle");
                 }
 
                 ImGui.Unindent();
@@ -127,20 +135,17 @@ public partial class TradeUtils
                 ImGui.Separator();
                 ImGui.Spacing();
 
-                // Settings (collapsible)
                 if (ImGui.CollapsingHeader("Settings", ImGuiTreeNodeFlags.DefaultOpen))
                 {
                     ImGui.Indent();
 
-                    // Max items
-                    int maxItems = Settings.BulkBuy.MaxItemsToBuy.Value;
-                    if (ImGui.SliderInt("Max Items##MaxItems", ref maxItems, 0, 100))
+                    // POESESSID (masked)
+                    string session = Settings.BulkBuy.SessionId?.Value ?? string.Empty;
+                    if (ImGui.InputText("POESESSID (BulkBuy)", ref session, 128, ImGuiInputTextFlags.Password))
                     {
-                        Settings.BulkBuy.MaxItemsToBuy.Value = maxItems;
-                    }
-                    if (ImGui.IsItemHovered())
-                    {
-                        ImGui.SetTooltip("Maximum items to buy (0 = unlimited)");
+                        if (Settings.BulkBuy.SessionId == null)
+                            Settings.BulkBuy.SessionId = new TextNode(string.Empty);
+                        Settings.BulkBuy.SessionId.Value = session;
                     }
 
                     ImGui.Spacing();

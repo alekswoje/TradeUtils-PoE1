@@ -373,49 +373,49 @@ public partial class TradeUtils
                     _allowMouseMovement = true;
                 }
                 
-                if (areaChangePurchaseWindowVisible && !_lastPurchaseWindowVisible)
-                {
-                    LogMessage($"🔔 PURCHASE WINDOW OPENED (During Area Cooldown): MoveMouseToItem={Settings.LiveSearch.AutoFeatures.MoveMouseToItem.Value}, TeleportedLocation={(_teleportedItemLocation.X != 0 || _teleportedItemLocation.Y != 0 ? $"({_teleportedItemLocation.X}, {_teleportedItemLocation.Y})" : "null")}");
-                    
-                    // Unlock TP when purchase window opens
-                    if (_tpLocked)
-                    {
-                        LogMessage("🔓 TP UNLOCKED (During Area Cooldown): Purchase window opened successfully");
-                        _tpLocked = false;
-                        _tpLockedTime = DateTime.MinValue;
-                    }
-                }
+                        if (areaChangePurchaseWindowVisible && !_lastPurchaseWindowVisible)
+                        {
+                            LogMessage($"🔔 PURCHASE WINDOW OPENED (During Area Cooldown): MoveMouseToItem={Settings.LiveSearch.AutoFeatures.MoveMouseToItem.Value}, TeleportedLocation={(_teleportedItemLocation.X != 0 || _teleportedItemLocation.Y != 0 ? $"({_teleportedItemLocation.X}, {_teleportedItemLocation.Y})" : "null")}");
+                            
+                            if (_tpLocked)
+                            {
+                                LogMessage("🔓 TP UNLOCKED (During Area Cooldown): Purchase window opened successfully");
+                                _tpLocked = false;
+                                _tpLockedTime = DateTime.MinValue;
+                            }
+                        }
                 
                 // Move mouse to item when window opens (even during area change cooldown!)
-                if (areaChangePurchaseWindowVisible && !_lastPurchaseWindowVisible && Settings.LiveSearch.AutoFeatures.MoveMouseToItem.Value)
-                {
-                    bool hasTeleportedItemLocation = _teleportedItemLocation.X != 0 || _teleportedItemLocation.Y != 0;
-                    if (_allowMouseMovement && (_windowWasClosedSinceLastMovement || hasTeleportedItemLocation))
-                    {
-                        if (_teleportedItemLocation.X != 0 || _teleportedItemLocation.Y != 0)
+                        if (areaChangePurchaseWindowVisible && !_lastPurchaseWindowVisible &&
+                            Settings.LiveSearch.AutoFeatures.MoveMouseToItem.Value)
                         {
-                            LogMessage($"🖱️ SAFE MOUSE MOVE (During Area Cooldown): Moving to teleported item at ({_teleportedItemLocation.X}, {_teleportedItemLocation.Y})");
-                            MoveMouseToItemLocation(_teleportedItemLocation.X, _teleportedItemLocation.Y);
-                            _teleportedItemLocation = (0, 0);
-                            _allowMouseMovement = false;
-                            _windowWasClosedSinceLastMovement = false;
-                        }
-                        else if (_recentItems.Count > 0)
-                        {
-                            lock (_recentItemsLock)
+                            bool hasTeleportedItemLocation = _teleportedItemLocation.X != 0 || _teleportedItemLocation.Y != 0;
+                            if (_allowMouseMovement && (_windowWasClosedSinceLastMovement || hasTeleportedItemLocation))
                             {
-                                if (_recentItems.Count > 0)
+                                if (_teleportedItemLocation.X != 0 || _teleportedItemLocation.Y != 0)
                                 {
-                                    LogMessage("🖱️ SAFE FALLBACK MOVE (During Area Cooldown): Using most recent item");
-                                    var item = _recentItems.Peek();
-                                    MoveMouseToItemLocation(item.X, item.Y);
+                                    LogMessage($"🖱️ SAFE MOUSE MOVE (During Area Cooldown): Moving to teleported item at ({_teleportedItemLocation.X}, {_teleportedItemLocation.Y})");
+                                    MoveMouseToItemLocation(_teleportedItemLocation.X, _teleportedItemLocation.Y);
+                                    _teleportedItemLocation = (0, 0);
                                     _allowMouseMovement = false;
                                     _windowWasClosedSinceLastMovement = false;
                                 }
+                                else if (_recentItems.Count > 0)
+                                {
+                                    lock (_recentItemsLock)
+                                    {
+                                        if (_recentItems.Count > 0)
+                                        {
+                                            LogMessage("🖱️ SAFE FALLBACK MOVE (During Area Cooldown): Using most recent item");
+                                            var item = _recentItems.Peek();
+                                            MoveMouseToItemLocation(item.X, item.Y);
+                                            _allowMouseMovement = false;
+                                            _windowWasClosedSinceLastMovement = false;
+                                        }
+                                    }
+                                }
                             }
                         }
-                    }
-                }
                 
                 _lastPurchaseWindowVisible = areaChangePurchaseWindowVisible;
                 
@@ -489,7 +489,7 @@ public partial class TradeUtils
             
             if (currentPurchaseWindowVisible && !_lastPurchaseWindowVisible)
             {
-                LogMessage($"🔔 PURCHASE WINDOW OPENED: MoveMouseToItem={Settings.LiveSearch.AutoFeatures.MoveMouseToItem.Value}, TeleportedLocation={(_teleportedItemLocation.X != 0 || _teleportedItemLocation.Y != 0 ? $"({_teleportedItemLocation.X}, {_teleportedItemLocation.Y})" : "null")}, AllowMovement={_allowMouseMovement}");
+                LogMessage($"🔔 PURCHASE WINDOW OPENED: MoveMouseToItem={Settings.LiveSearch.AutoFeatures.MoveMouseToItem.Value}, ForceAutoBuy={_forceAutoBuy}, TeleportedLocation={(_teleportedItemLocation.X != 0 || _teleportedItemLocation.Y != 0 ? $"({_teleportedItemLocation.X}, {_teleportedItemLocation.Y})" : "null")}, AllowMovement={_allowMouseMovement}");
                 
                 // Unlock TP when purchase window opens
                 if (_tpLocked)
@@ -501,7 +501,8 @@ public partial class TradeUtils
             }
             
             // Move mouse to item when window opens (if enabled and we have a location)
-            if (currentPurchaseWindowVisible && !_lastPurchaseWindowVisible && Settings.LiveSearch.AutoFeatures.MoveMouseToItem.Value)
+            if (currentPurchaseWindowVisible && !_lastPurchaseWindowVisible &&
+                Settings.LiveSearch.AutoFeatures.MoveMouseToItem.Value)
             {
                 if (!_allowMouseMovement)
                 {

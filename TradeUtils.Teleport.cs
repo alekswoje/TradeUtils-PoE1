@@ -37,7 +37,8 @@ public partial class TradeUtils
             
             using (var request = new HttpRequestMessage(HttpMethod.Get, fetchUrl))
             {
-                request.Headers.Add("Cookie", $"POESESSID={Settings.LiveSearch.SecureSessionId}");
+                var sessionId = GetPoeSessionForRequests();
+                request.Headers.Add("Cookie", $"POESESSID={sessionId}");
                 request.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36");
                 
                 using (var response = await _httpClient.SendAsync(request))
@@ -203,7 +204,8 @@ public partial class TradeUtils
         {
             Content = new StringContent($"{{ \"token\": \"{currentItem.HideoutToken}\", \"continue\": true }}", Encoding.UTF8, "application/json")
         };
-        request.Headers.Add("Cookie", $"POESESSID={Settings.LiveSearch.SecureSessionId}");
+        var sessionId = GetPoeSessionForRequests();
+        request.Headers.Add("Cookie", $"POESESSID={sessionId}");
         request.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36");
         request.Headers.Add("Accept", "*/*");
         request.Headers.Add("Accept-Encoding", "gzip, deflate, br, zstd");
@@ -249,6 +251,7 @@ public partial class TradeUtils
             
             LogDebug("Sending teleport request...");
             
+            _lastTeleportSucceeded = false;
             var response = await _httpClient.SendAsync(request);
             LogDebug($"Response status: {response.StatusCode}");
             
@@ -350,6 +353,7 @@ public partial class TradeUtils
                 if (actualSuccess)
                 {
                     LogInfo("✅ Teleport to hideout successful!");
+                    _lastTeleportSucceeded = true;
                     
                     // Store location for BOTH manual and auto teleports to enable mouse movement
                     _teleportedItemLocation = (currentItem.X, currentItem.Y);
@@ -532,66 +536,67 @@ public partial class TradeUtils
             
             LogDebug($"Moved mouse to item location: Stash({x},{y}) -> Screen({finalX},{finalY}) - Panel size: {rect.Width}x{rect.Height}");
             
-            // Auto Buy: Perform Ctrl+Left Click if enabled
-            if (Settings.LiveSearch.AutoFeatures.AutoBuy.Value)
+            // Auto Buy: for BulkBuy we always click, for LiveSearch respect its AutoBuy setting
+            if (!_forceAutoBuy && !Settings.LiveSearch.AutoFeatures.AutoBuy.Value)
             {
-                LogMessage($"🛒 AUTO BUY START: Beginning auto-buy process for coordinates ({x}, {y})");
+                LogMessage("🚫 AUTO BUY SKIPPED: Auto-buy is disabled in settings");
+                return;
+            }
 
-                // Find the item being processed and update the log entry
-                LogMessage($"🔍 LOOKING FOR ITEM AT COORDINATES: ({x}, {y})");
+            string sigBefore = _forceAutoBuy ? GetInventorySignature() : null;
 
-                RecentItem itemBeingProcessed = null;
-
-                // Retry lookup up to 3 times with small delays to allow state to settle
-                const int maxFindAttempts = 3;
-                for (int attempt = 1; attempt <= maxFindAttempts && itemBeingProcessed == null; attempt++)
+            RecentItem itemBeingProcessed = null;
+            const int maxFindAttempts = 3;
+            for (int attempt = 1; attempt <= maxFindAttempts && itemBeingProcessed == null; attempt++)
+            {
+                itemBeingProcessed = FindRecentItemByCoordinates(x, y);
+                if (itemBeingProcessed == null && _teleportedItemInfo != null)
                 {
-                    // First try to find in recent items (for fallback)
-                    itemBeingProcessed = FindRecentItemByCoordinates(x, y);
-
-                    // If not found in recent items, try the teleported item info
-                    if (itemBeingProcessed == null && _teleportedItemInfo != null)
-                    {
-                        LogMessage($"🔄 USING TELEPORTED ITEM INFO: '{_teleportedItemInfo.Name}' (Search: {_teleportedItemInfo.SearchId})");
-                        itemBeingProcessed = _teleportedItemInfo;
-                    }
-
-                    if (itemBeingProcessed == null)
-                    {
-                        LogMessage($"⏳ ITEM NOT FOUND (attempt {attempt}/{maxFindAttempts}), retrying in 100ms...");
-                        await Task.Delay(100);
-                    }
+                    itemBeingProcessed = _teleportedItemInfo;
                 }
-
-                if (itemBeingProcessed != null)
+                if (itemBeingProcessed == null)
                 {
-                    LogMessage($"✅ FOUND ITEM FOR LOG UPDATE: '{itemBeingProcessed.Name}' (Search: {itemBeingProcessed.SearchId}) at ({x}, {y})");
-                    LogMessage($"🔄 CALLING UPDATE AUTO-BUY ATTEMPT...");
-                    UpdateAutoBuyAttempt(itemBeingProcessed.Name, itemBeingProcessed.SearchId);
-                    LogMessage($"✅ UPDATE AUTO-BUY ATTEMPT COMPLETED");
-
-                    // Small delay to ensure mouse movement is complete
-                    LogMessage("⏳ AUTO BUY DELAY: Waiting 100ms before click...");
+                    LogMessage($"⏳ ITEM NOT FOUND (attempt {attempt}/{maxFindAttempts}) at ({x},{y}), retrying in 100ms...");
                     await Task.Delay(100);
-
-                    LogMessage("🖱️ AUTO BUY CLICK: Performing Ctrl+Left Click");
-                    await PerformCtrlLeftClickAsync();
-                    LogMessage("✅ AUTO BUY COMPLETE: Ctrl+Left Click performed");
-
-                    // Clear the teleported item info after successful purchase attempt
-                    _teleportedItemInfo = null;
                 }
-                else
-                {
-                    LogMessage($"❌ ITEM NOT FOUND AFTER RETRIES for coordinates ({x}, {y}) - skipping auto-buy click");
-                    LogMessage($"💡 Checked both recent items and teleported item info");
-                    return;
-                }
+            }
+
+            if (itemBeingProcessed != null)
+            {
+                LogMessage($"✅ FOUND ITEM FOR LOG UPDATE: '{itemBeingProcessed.Name}' (Search: {itemBeingProcessed.SearchId}) at ({x}, {y})");
+                LogMessage("🔄 CALLING UPDATE AUTO-BUY ATTEMPT...");
+                UpdateAutoBuyAttempt(itemBeingProcessed.Name, itemBeingProcessed.SearchId);
+                LogMessage("✅ UPDATE AUTO-BUY ATTEMPT COMPLETED");
             }
             else
             {
-                LogMessage("🚫 AUTO BUY SKIPPED: Auto-buy is disabled in settings");
+                LogMessage($"❌ ITEM NOT FOUND AFTER RETRIES for coordinates ({x}, {y}) - skipping auto-buy click");
+                LogMessage("💡 Checked both recent items and teleported item info");
+                return;
             }
+
+            LogMessage("⏳ AUTO BUY DELAY: Waiting 100ms before click...");
+            await Task.Delay(100);
+
+            LogMessage("🖱️ AUTO BUY CLICK: Performing Ctrl+Left Click");
+            await PerformCtrlLeftClickAsync();
+            LogMessage("✅ AUTO BUY COMPLETE: Ctrl+Left Click performed");
+
+            if (_forceAutoBuy && !string.IsNullOrEmpty(sigBefore))
+            {
+                await Task.Delay(1000);
+                var sigAfter = GetInventorySignature();
+                if (sigAfter == sigBefore)
+                {
+                    LogMessage("BulkBuy: inventory unchanged after first click, performing second safety click.");
+                    await PerformCtrlLeftClickAsync();
+                }
+                else
+                {
+                    LogMessage("BulkBuy: inventory changed after first click, skipping second click.");
+                }
+            }
+
         }
         catch (Exception ex)
         {
@@ -814,3 +819,4 @@ public partial class TradeUtils
         return null;
     }
 }
+

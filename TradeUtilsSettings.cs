@@ -778,7 +778,6 @@ public class BulkBuySubSettings
     {
         GroupsConfig = new BulkBuyGroupsRenderer(this);
         General = new BbGeneralSubMenu(this);
-        PurchaseLimits = new BbPurchaseLimitsSubMenu(this);
         TimingDelays = new BbTimingDelaysSubMenu(this);
         Safety = new BbSafetySubMenu(this);
         Logging = new BbLoggingSubMenu(this);
@@ -796,18 +795,16 @@ public class BulkBuySubSettings
     [IgnoreMenu]
     public ToggleNode ShowGui { get; set; } = new ToggleNode(true);
 
+    [IgnoreMenu]
+    public TextNode SessionId { get; set; } = new TextNode("");
+
+    [Menu("Toggle BulkBuy Hotkey", "Key to start/stop bulk buying")]
+    [IgnoreMenu]
+    public HotkeyNode ToggleHotkey { get; set; } = new HotkeyNode(Keys.None);
+
     [Menu("Stop All Hotkey", "Key to emergency stop all bulk purchases")]
     [IgnoreMenu]
     public HotkeyNode StopAllHotkey { get; set; } = new HotkeyNode(Keys.None);
-
-    // ===== SEARCH CONFIGURATION =====
-    [Menu("Max Items to Buy", "Maximum number of items to purchase (0 = unlimited)")]
-    [IgnoreMenu]
-    public RangeNode<int> MaxItemsToBuy { get; set; } = new RangeNode<int>(10, 0, 100);
-
-    [Menu("Max Total Spend", "Maximum total currency to spend (0 = unlimited)")]
-    [IgnoreMenu]
-    public RangeNode<int> MaxTotalSpend { get; set; } = new RangeNode<int>(0, 0, 10000);
 
     // ===== TIMING & DELAYS =====
     [Menu("Delay Between Purchases (ms)", "Delay between each purchase attempt (human-like behavior)")]
@@ -881,9 +878,8 @@ public class BulkBuySubSettings
     [JsonIgnore]
     public int FailedPurchases { get; set; } = 0;
 
-    // Grouped submenu properties for BulkBuy
+    // Grouped submenu properties for BulkBuy (no global purchase limits; limits are per search)
     [Submenu(CollapsedByDefault = true)] public BbGeneralSubMenu General { get; set; }
-    [Submenu(CollapsedByDefault = true)] public BbPurchaseLimitsSubMenu PurchaseLimits { get; set; }
     [Submenu(CollapsedByDefault = true)] public BbTimingDelaysSubMenu TimingDelays { get; set; }
     [Submenu(CollapsedByDefault = true)] public BbSafetySubMenu Safety { get; set; }
     [Submenu(CollapsedByDefault = true)] public BbLoggingSubMenu Logging { get; set; }
@@ -896,15 +892,7 @@ public class BbGeneralSubMenu
     public BbGeneralSubMenu(BulkBuySubSettings p) { _p = p; }
     [Menu("Debug Mode")] public ToggleNode DebugMode => _p.DebugMode;
     [Menu("Show GUI")] public ToggleNode ShowGui => _p.ShowGui;
-    [Menu("Stop All Hotkey")] public HotkeyNode StopAllHotkey => _p.StopAllHotkey;
-}
-
-public class BbPurchaseLimitsSubMenu
-{
-    private readonly BulkBuySubSettings _p;
-    public BbPurchaseLimitsSubMenu(BulkBuySubSettings p) { _p = p; }
-    [Menu("Max Items to Buy")] public RangeNode<int> MaxItemsToBuy => _p.MaxItemsToBuy;
-    [Menu("Max Total Spend")] public RangeNode<int> MaxTotalSpend => _p.MaxTotalSpend;
+    [Menu("Toggle BulkBuy Hotkey")] public HotkeyNode ToggleHotkey => _p.ToggleHotkey;
 }
 
 public class BbTimingDelaysSubMenu
@@ -944,7 +932,7 @@ public class BulkBuyGroup
         Name = new TextNode("New Group");
         Enable = new ToggleNode(false);
         Searches = new List<BulkBuySearch>();
-        TradeUrl = new TextNode("");
+        League = new TextNode("Keepers");
     }
 
     [Menu("Group Name")]
@@ -953,8 +941,8 @@ public class BulkBuyGroup
     [Menu("Enable Group")]
     public ToggleNode Enable { get; set; }
 
-    [Menu("Trade URL")]
-    public TextNode TradeUrl { get; set; }
+    [Menu("Default League")]
+    public TextNode League { get; set; }
 
     public List<BulkBuySearch> Searches { get; set; }
 }
@@ -968,6 +956,7 @@ public class BulkBuySearch
         League = new TextNode("");
         SearchId = new TextNode("");
         MaxItems = new RangeNode<int>(10, 1, 100);
+        QueryJson = new TextNode("");
     }
 
     [Menu("Search Name")]
@@ -984,6 +973,10 @@ public class BulkBuySearch
 
     [Menu("Max Items")]
     public RangeNode<int> MaxItems { get; set; }
+
+    // Raw JSON query body for non-live trade searches (POST /api/trade/search/Keepers)
+    [Menu("Query JSON")]
+    public TextNode QueryJson { get; set; }
 }
 
 // ==================== BULKBUY GROUPS RENDERER ====================
@@ -1033,32 +1026,21 @@ public class BulkBuyGroupsRenderer
                 _groupNameBuffers[groupIdKey] = group.Name.Value;
             }
             var groupNameBuffer = _groupNameBuffers[groupIdKey];
-            groupNameBuffer = group.Name.Value; // Sync buffer with current value
+            groupNameBuffer = group.Name.Value;
 
             bool groupEnabled = group.Enable.Value;
-            bool isOpen = ImGui.CollapsingHeader($"Group##bulkgroup{i}"); // Static ID for header
+            bool isOpen = ImGui.CollapsingHeader($"Group##bulkgroup{i}");
 
-            // Handle shift-click on the header
             if (ImGui.IsItemClicked(ImGuiMouseButton.Left) && ImGui.GetIO().KeyShift)
             {
                 group.Enable.Value = !group.Enable.Value;
-                groupEnabled = group.Enable.Value; // Update local state immediately
+                groupEnabled = group.Enable.Value;
             }
 
             ImGui.SameLine();
-
-            // Simple ON/OFF text with color
-            if (groupEnabled)
-            {
-                ImGui.TextColored(new Vector4(0.0f, 1.0f, 0.0f, 1.0f), "[ON]"); // Green ON for enabled
-            }
-            else
-            {
-                ImGui.TextColored(new Vector4(1.0f, 0.0f, 0.0f, 1.0f), "[OFF]"); // Red OFF for disabled
-            }
-
+            ImGui.Text(groupEnabled ? "[ON]" : "[OFF]");
             ImGui.SameLine();
-            ImGui.Text(group.Name.Value); // Display dynamic name
+            ImGui.Text(group.Name.Value);
 
             if (ImGui.IsItemClicked(ImGuiMouseButton.Right))
             {
@@ -1081,55 +1063,28 @@ public class BulkBuyGroupsRenderer
                 {
                     group.Name.Value = groupNameBuffer; // Update dynamically as they type
                 }
-                var enableGroup = group.Enable.Value;
-                ImGui.Checkbox($"Enable##bulkgroup{i}", ref enableGroup);
-                group.Enable.Value = enableGroup;
-                HelpMarker("Enable or disable this group; right-click header to delete group");
-                var url = group.TradeUrl.Value.Trim();
-                string urlBuffer = url;
-                if (ImGui.InputText($"Add from URL##bulkgroup{i}", ref urlBuffer, 100))
+                // Default League for searches in this group
+                string groupLeague = group.League?.Value ?? "Keepers";
+                if (ImGui.InputText($"League##bulkgroup_league{i}", ref groupLeague, 32))
                 {
-                    group.TradeUrl.Value = urlBuffer;
+                    if (group.League == null)
+                        group.League = new TextNode("Keepers");
+                    group.League.Value = string.IsNullOrWhiteSpace(groupLeague) ? "Keepers" : groupLeague;
                 }
-                HelpMarker("Enter a trade search URL to add searches");
-                if (ImGui.Button($"Add Search from URL##bulkgroup{i}"))
+                HelpMarker("Default league for new BulkBuy searches in this group (e.g. Keepers). Each search can override its own league.");
+                if (ImGui.Button($"Add Search##bulkgroup{i}"))
                 {
-                    if (string.IsNullOrWhiteSpace(urlBuffer))
+                    // Create a blank JSON search entry, seeded with the group's default league
+                    string newLeague = group.League?.Value ?? "Keepers";
+                    group.Searches.Add(new BulkBuySearch
                     {
-                        ImGui.TextColored(new Vector4(1.0f, 0.0f, 0.0f, 1.0f), "Error: URL cannot be empty.");
-                    }
-                    else
-                    {
-                        Uri uri;
-                        try
-                        {
-                            uri = new Uri(urlBuffer.StartsWith("http") ? urlBuffer : $"https://www.pathofexile.com/trade/search/Standard/{urlBuffer}");
-                        }
-                        catch (UriFormatException)
-                        {
-                            ImGui.TextColored(new Vector4(1.0f, 0.0f, 0.0f, 1.0f), "Error: Invalid URL format.");
-                            return;
-                        }
-                        var segments = uri.AbsolutePath.TrimStart('/').Split('/');
-                        if (segments.Length >= 4 && segments[0] == "trade" && segments[1] == "search")
-                        {
-                            var league = Uri.UnescapeDataString(segments[2]);
-                            var searchId = segments[3];
-                            group.Searches.Add(new BulkBuySearch
-                            {
-                                League = new TextNode(league),
-                                SearchId = new TextNode(searchId),
-                                Name = new TextNode($"Search {group.Searches.Count + 1}"),
-                                Enable = new ToggleNode(false)
-                            });
-                            ImGui.TextColored(new Vector4(0.0f, 1.0f, 0.0f, 1.0f), $"Added search: {searchId} in {league}");
-                        }
-                        else
-                        {
-                            ImGui.TextColored(new Vector4(1.0f, 0.0f, 0.0f, 1.0f), "Error: URL must match trade search format.");
-                        }
-                        group.TradeUrl.Value = "";
-                    }
+                        Name = new TextNode($"Search {group.Searches.Count + 1}"),
+                        Enable = new ToggleNode(false),
+                        League = new TextNode(string.IsNullOrWhiteSpace(newLeague) ? "Keepers" : newLeague),
+                        SearchId = new TextNode(""),
+                        MaxItems = new RangeNode<int>(10, 1, 100),
+                        QueryJson = new TextNode("")
+                    });
                 }
                 var tempSearches = new List<BulkBuySearch>(group.Searches);
                 for (int j = 0; j < tempSearches.Count; j++)
@@ -1189,18 +1144,42 @@ public class BulkBuyGroupsRenderer
                         {
                             search.Name.Value = searchNameBuffer; // Update dynamically as they type
                         }
-                        var enableSearch = search.Enable.Value;
+                        bool enableSearch = search.Enable.Value;
                         ImGui.Checkbox($"Enable##bulksearch{i}{j}", ref enableSearch);
                         search.Enable.Value = enableSearch;
                         HelpMarker("Enable or disable this search; right-click header to delete search");
-                        ImGui.Text($"League: {search.League.Value}");
-                        ImGui.Text($"Search ID: {search.SearchId.Value}");
+
+                        // League per search (used to choose /trade/search/{league})
+                        string leagueValue = search.League?.Value ?? group.League?.Value ?? "Keepers";
+                        if (ImGui.InputText($"League##bulksearch_league{i}{j}", ref leagueValue, 32))
+                        {
+                            if (search.League == null)
+                                search.League = new TextNode("Keepers");
+                            search.League.Value = string.IsNullOrWhiteSpace(leagueValue) ? "Keepers" : leagueValue;
+                        }
+                        HelpMarker("League for this search (e.g. Keepers). Overrides the group's default league.");
+
                         var maxItems = search.MaxItems.Value;
                         if (ImGui.SliderInt($"Max Items##bulksearch{i}{j}", ref maxItems, 1, 100))
                         {
                             search.MaxItems.Value = maxItems;
                         }
                         HelpMarker("Maximum items to buy from this search");
+
+                        // Query JSON input (multi-line)
+                        string queryJson = search.QueryJson?.Value ?? "";
+                        if (ImGui.InputTextMultiline(
+                                $"Query JSON##bulksearch_query{i}{j}",
+                                ref queryJson,
+                                4096,
+                                new Vector2(0, ImGui.GetTextLineHeight() * 6)))
+                        {
+                            if (search.QueryJson == null)
+                                search.QueryJson = new TextNode("");
+                            search.QueryJson.Value = queryJson;
+                        }
+                        HelpMarker("Paste the full trade search JSON body here (as copied from the browser). League will default to 'Keepers'.");
+
                         ImGui.Unindent();
                     }
                 }
@@ -1218,7 +1197,7 @@ public class BulkBuyGroupsRenderer
                 Name = new TextNode($"Group {_parent.Groups.Count + 1}"),
                 Enable = new ToggleNode(false),
                 Searches = new List<BulkBuySearch>(),
-                TradeUrl = new TextNode("")
+                League = new TextNode("Keepers")
             });
         }
         HelpMarker("Add a new group to organize your bulk buy searches");

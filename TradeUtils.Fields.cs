@@ -75,6 +75,9 @@ public partial class TradeUtils
     // Cached purchase window position for Fast Mode
     private (float x, float y) _cachedPurchaseWindowTopLeft = (0, 0);
     private bool _hasCachedPosition = false;
+
+    // When true, always perform auto-buy clicks regardless of LiveSearch AutoBuy setting (used by BulkBuy).
+    private bool _forceAutoBuy = false;
     
     // ==================== HELPER METHODS ====================
     
@@ -290,5 +293,40 @@ public partial class TradeUtils
     // Mouse event flags  
     private const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
     private const uint MOUSEEVENTF_LEFTUP = 0x0004;
+
+    private string GetPoeSessionForRequests()
+    {
+        var bulk = Settings?.BulkBuy?.SessionId?.Value;
+        if (!string.IsNullOrWhiteSpace(bulk))
+            return bulk;
+
+        return LiveSearchSettings?.SecureSessionId ?? string.Empty;
+    }
+
+    // Set true when the last teleport API call reported success.
+    private bool _lastTeleportSucceeded = false;
+
+    private string GetInventorySignature()
+    {
+        try
+        {
+            var inventoryItems = GameController.IngameState.ServerData.PlayerInventories[0].Inventory.InventorySlotItems;
+            int count = 0, sumX = 0, sumY = 0, sumW = 0, sumH = 0;
+            foreach (var item in inventoryItems)
+            {
+                count++;
+                sumX += item.PosX;
+                sumY += item.PosY;
+                sumW += item.SizeX;
+                sumH += item.SizeY;
+            }
+            return $"{count}|{sumX}|{sumY}|{sumW}|{sumH}";
+        }
+        catch (Exception ex)
+        {
+            LogError($"BulkBuy: error computing inventory signature: {ex.Message}");
+            return string.Empty;
+        }
+    }
 }
 
