@@ -439,6 +439,7 @@ public partial class TradeUtils
                                                     else if (orbType == "Divine Orb" && LowerPriceSettings.RepriceDivine.Value) reprice = true;
                                                     else if (orbType == "Exalted Orb" && LowerPriceSettings.RepriceExalted.Value) reprice = true;
                                                     else if (orbType == "Orb of Annulment" && LowerPriceSettings.RepriceAnnul.Value) reprice = true;
+                                                    else if (orbType == "Mirror of Kalandra" && LowerPriceSettings.RepriceMirror.Value) reprice = true;
 
                                                     LogMessage($"LowerPrice DEBUG: Item {processedCount} - Reprice = {reprice}");
                                                     if (!reprice)
@@ -593,6 +594,9 @@ public partial class TradeUtils
             case "Orb of Annulment":
                 // Annul Override: if checked, force flat reduction; if unchecked, use global setting
                 useFlatReduction = LowerPriceSettings.AnnulUseFlat ? true : LowerPriceSettings.UseFlatReduction;
+                break;
+            case "Mirror of Kalandra":
+                useFlatReduction = LowerPriceSettings.MirrorUseFlat ? true : LowerPriceSettings.UseFlatReduction;
                 break;
             default:
                 // Use global setting for unknown currencies
@@ -841,6 +845,9 @@ public partial class TradeUtils
             _lowerPriceCurrencyRates["annul_to_chaos"] = -1m;
             _lowerPriceCurrencyRates["annul_to_divine"] = -1m;
             _lowerPriceCurrencyRates["annul_to_exalted"] = -1m;
+            _lowerPriceCurrencyRates["mirror_to_chaos"] = -1m;
+            _lowerPriceCurrencyRates["mirror_to_divine"] = -1m;
+            _lowerPriceCurrencyRates["mirror_to_exalted"] = -1m;
         }
     }
 
@@ -951,6 +958,8 @@ public partial class TradeUtils
                 displayText += $"Exalts: {itemValues.ExaltedTotal:F1}\n";
             if (itemValues.AnnulTotal > 0)
                 displayText += $"Annuls: {itemValues.AnnulTotal:F0}\n";
+            if (itemValues.MirrorTotal > 0)
+                displayText += $"Mirrors: {itemValues.MirrorTotal:F0}\n";
             
             displayText += $"\nTotal in Divine: {itemValues.TotalInDivine:F1}\n";
             displayText += $"Total in Exalts: {itemValues.TotalInExalted:F1}";
@@ -1085,6 +1094,11 @@ public partial class TradeUtils
                                 summary.TotalInDivine += price * GetLowerPriceRate("annul_to_divine");
                                 summary.TotalInExalted += price * GetLowerPriceRate("annul_to_exalted");
                                 break;
+                            case "Mirror of Kalandra":
+                                summary.MirrorTotal += price;
+                                summary.TotalInDivine += price * GetLowerPriceRate("mirror_to_divine");
+                                summary.TotalInExalted += price * GetLowerPriceRate("mirror_to_exalted");
+                                break;
                         }
                     }
                 }
@@ -1136,6 +1150,7 @@ public class ItemValueSummary
     public decimal DivineTotal { get; set; }
     public decimal ExaltedTotal { get; set; }
     public decimal AnnulTotal { get; set; }
+    public decimal MirrorTotal { get; set; }
     public decimal TotalInDivine { get; set; }
     public decimal TotalInExalted { get; set; }
 }
