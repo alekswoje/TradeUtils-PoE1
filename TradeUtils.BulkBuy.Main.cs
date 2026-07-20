@@ -306,7 +306,7 @@ public partial class TradeUtils
                 if (remainingForSearch <= 0)
                     break;
 
-                LogMessage($"BulkBuy: Processing search '{search.Name.Value}' with limit {remainingForSearch} items (JSON query mode, league='Keepers')");
+                LogMessage($"BulkBuy: Processing search '{search.Name.Value}' with limit {remainingForSearch} items (JSON query mode, league='{EffectiveLeague(search.League?.Value)}')");
 
                 int purchasedFromSearch = await ProcessBulkBuyForSearchAsync(search, remainingForSearch, sessionId, ct);
 
@@ -383,7 +383,7 @@ public partial class TradeUtils
                     }
                 }
 
-                string league = string.IsNullOrWhiteSpace(search.League?.Value) ? "Keepers" : search.League.Value;
+                string league = EffectiveLeague(search.League?.Value);
                 string searchUrl = $"https://www.pathofexile.com/api/trade/search/{league}";
 
                 var body = search.QueryJson.Value.Trim();
@@ -391,7 +391,7 @@ public partial class TradeUtils
                 using (var request = new System.Net.Http.HttpRequestMessage(System.Net.Http.HttpMethod.Post, searchUrl))
                 {
                     request.Headers.Add("Cookie", $"POESESSID={sessionId}");
-                    request.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36");
+                    request.Headers.Add("User-Agent", PluginUserAgent);
                     request.Headers.Add("Accept", "*/*");
                     request.Headers.Add("Accept-Encoding", "gzip, deflate, br, zstd");
                     request.Headers.Add("Accept-Language", "en-US,en;q=0.9");
@@ -531,12 +531,12 @@ public partial class TradeUtils
             using (var request = new System.Net.Http.HttpRequestMessage(System.Net.Http.HttpMethod.Get, fetchUrl))
             {
                 request.Headers.Add("Cookie", $"POESESSID={sessionId}");
-                request.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36");
+                request.Headers.Add("User-Agent", PluginUserAgent);
                 request.Headers.Add("Accept", "*/*");
                 request.Headers.Add("Accept-Encoding", "gzip, deflate, br, zstd");
                 request.Headers.Add("Accept-Language", "en-US,en;q=0.9");
                 request.Headers.Add("Priority", "u=1, i");
-                request.Headers.Add("Referer", "https://www.pathofexile.com/trade/search/Keepers");
+                request.Headers.Add("Referer", $"https://www.pathofexile.com/trade/search/{EffectiveLeague(search.League?.Value)}");
                 request.Headers.Add("X-Requested-With", "XMLHttpRequest");
 
                 using (var response = await _httpClient.SendAsync(request, ct))

@@ -853,29 +853,55 @@ public partial class TradeUtils
 
         try
         {
-            // Try API first, fallback to local file
-            // Note: POE1 uses different poe.ninja leagues
-            JsonDocument jsonDoc;
+            // Fetch currency rates from poe.ninja for the league the player is actually in.
+            // This only powers the value display and cross-currency overrides — percentage
+            // repricing works without it, so any failure here is non-fatal (keep default rates).
+            JsonDocument jsonDoc = null;
+            string league = ResolveLeague();
+            string ninjaUrl = $"https://poe.ninja/api/data/currencyoverview?league={Uri.EscapeDataString(league)}&type=Currency";
             try
             {
-                // Use Standard league for POE1 - adjust as needed
-                var response = await _lowerPriceHttpClient.GetStringAsync("https://poe.ninja/api/data/currencyoverview?league=Standard&type=Currency");
-                jsonDoc = JsonDocument.Parse(response);
+                using (var ninjaReq = new HttpRequestMessage(HttpMethod.Get, ninjaUrl))
+                {
+                    ninjaReq.Headers.Add("User-Agent", PluginUserAgent);
+                    using (var ninjaResp = await _lowerPriceHttpClient.SendAsync(ninjaReq))
+                    {
+                        if (ninjaResp.IsSuccessStatusCode)
+                        {
+                            var response = await ninjaResp.Content.ReadAsStringAsync();
+                            jsonDoc = JsonDocument.Parse(response);
+                        }
+                        else
+                        {
+                            LogMessage($"LowerPrice: poe.ninja returned HTTP {(int)ninjaResp.StatusCode} for league '{league}'. Currency value display is unavailable (percentage repricing is unaffected). poe.ninja's data API may have moved — see README.");
+                        }
+                    }
+                }
             }
-            catch
+            catch (Exception ex)
             {
-                // Fallback to local poeninja.json file
+                LogMessage($"LowerPrice: could not reach poe.ninja ({ex.Message}). Currency value display unavailable; repricing still works.");
+            }
+
+            if (jsonDoc == null)
+            {
+                // Optional local fallback file (not shipped by default).
                 var localJsonPath = Path.Combine(DirectoryFullName, "poeninja.json");
                 if (File.Exists(localJsonPath))
                 {
-                    var localJson = await File.ReadAllTextAsync(localJsonPath);
-                    jsonDoc = JsonDocument.Parse(localJson);
+                    try
+                    {
+                        var localJson = await File.ReadAllTextAsync(localJsonPath);
+                        jsonDoc = JsonDocument.Parse(localJson);
+                    }
+                    catch (Exception ex)
+                    {
+                        LogError($"LowerPrice: failed to parse local poeninja.json: {ex.Message}");
+                    }
                 }
-                else
-                {
-                    LogError("Failed to fetch currency rates from API and local file not found");
-                    return;
-                }
+
+                if (jsonDoc == null)
+                    return; // Keep default rates; non-fatal.
             }
             
             lock (_lowerPriceCurrencyRatesLock)

@@ -172,7 +172,7 @@ public partial class TradeUtils
                 WebSocket = new ClientWebSocket();
                 var cookie = $"POESESSID={sessionId}";
                 WebSocket.Options.SetRequestHeader("Cookie", cookie);
-                WebSocket.Options.SetRequestHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36");
+                WebSocket.Options.SetRequestHeader("User-Agent", PluginUserAgent);
                 WebSocket.Options.SetRequestHeader("Origin", "https://www.pathofexile.com");
                 WebSocket.Options.SetRequestHeader("Accept-Encoding", "gzip, deflate, br, zstd");
                 WebSocket.Options.SetRequestHeader("Accept-Language", "en-US,en;q=0.9");
@@ -606,7 +606,7 @@ public partial class TradeUtils
                 {
                     var cookie = $"POESESSID={sessionId}";
                     request.Headers.Add("Cookie", cookie);
-                    request.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36");
+                    request.Headers.Add("User-Agent", PluginUserAgent);
                     request.Headers.Add("Accept", "*/*");
                     request.Headers.Add("Accept-Encoding", "gzip, deflate, br, zstd");
                     request.Headers.Add("Accept-Language", "en-US,en;q=0.9");

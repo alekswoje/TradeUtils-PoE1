@@ -23,6 +23,9 @@ public class TradeUtilsSettings : ISettings
 
     public ToggleNode Enable { get; set; } = new ToggleNode(true);
 
+    [Menu("Auto-Detect League", "Use the league your character is currently in for trade searches and currency rates. Leave this ON so searches keep working after every league launch (fixes the 'Invalid query' error from the old hardcoded league). Turn OFF only if you want to force a manually-set league per search.")]
+    public ToggleNode AutoDetectLeague { get; set; } = new ToggleNode(true);
+
     [Menu("Live Search Settings")]
     public LiveSearchSubSettings LiveSearch { get; set; }
     
