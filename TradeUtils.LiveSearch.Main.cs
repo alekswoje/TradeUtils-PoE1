@@ -25,6 +25,19 @@ public partial class TradeUtils : BaseSettingsPlugin<TradeUtilsSettings>
             return true; // Return true so plugin doesn't error out
         }
         
+        // ---- Account-risk notice (also logged so users who never open the README still see it) ----
+        LogMessage("========================================================");
+        LogMessage("TradeUtils: ACCOUNT-RISK NOTICE");
+        LogMessage("This plugin reads game memory (via ExileCore) and can automate");
+        LogMessage("trade actions. Both are against GGG's Terms of Use and can lead");
+        LogMessage("to account bans. Auto-whisper / auto-teleport live search is the");
+        LogMessage("highest-risk feature. Read the README 'Account risk' section");
+        LogMessage("before use. You accept this risk by running the plugin.");
+        LogMessage("========================================================");
+
+        // Warm up league auto-detection so the current league is cached before the first request.
+        _ = EnsureApiLeagueAsync();
+
         // Set plugin instance reference in settings for GUI access
         Settings.LiveSearch.GroupsConfig.PluginInstance = this;
         Settings.BulkBuy.GroupsConfig.PluginInstance = this;

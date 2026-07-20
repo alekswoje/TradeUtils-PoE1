@@ -14,6 +14,8 @@ public partial class TradeUtils
     // Currency Exchange specific fields
     private readonly ConcurrentDictionary<RectangleF, bool?> _currencyExchangeMouseStateForRect = new();
     private bool _currencyExchangeButtonImageLoaded = false;
+    // Throttles the "panel open but input field not found" warning so it doesn't spam every frame.
+    private DateTime _currencyExchangeInputMissingLastLog = DateTime.MinValue;
     
     partial void InitializeCurrencyExchange()
     {
@@ -63,19 +65,32 @@ public partial class TradeUtils
             
             if (!CurrencyExchangeSettings.ShowButton.Value)
             {
+                if (CurrencyExchangeSettings.DebugMode.Value)
+                    LogMessage("CurrencyExchange: button hidden because 'Show Button' is OFF (enable it in Currency Exchange settings).");
                 return;
             }
-            
+
             // Check if selector is visible (I Have / I Want popup)
             if (IsCurrencyExchangeSelectorVisible())
             {
                 return;
             }
-            
+
             // Get the offered item count input field
             var offeredItemCountInput = currencyExchangePanel.OfferedItemCountInput;
             if (offeredItemCountInput == null)
             {
+                // Panel is open and the button should be shown, but the input field couldn't be read.
+                // This is the usual symptom of an ExileCore offset mismatch after a game patch
+                // (e.g. the 3.28 Currency Exchange relayout): the button silently doesn't appear.
+                // Log it (throttled) so users can actually diagnose it instead of seeing nothing.
+                if ((DateTime.Now - _currencyExchangeInputMissingLastLog).TotalSeconds > 15)
+                {
+                    _currencyExchangeInputMissingLastLog = DateTime.Now;
+                    LogError("CurrencyExchange: panel is open but OfferedItemCountInput is null - cannot place the button. " +
+                             "This usually means ExileCore/GameOffsets are out of date for the current game patch. " +
+                             "Update ExileCore and the plugin; if it persists after a game update, the UI offsets need fixing.");
+                }
                 return;
             }
             
