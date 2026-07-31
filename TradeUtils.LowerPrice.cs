@@ -448,6 +448,7 @@ public partial class TradeUtils
                                                     else if (orbType == "Divine Orb" && LowerPriceSettings.RepriceDivine.Value) reprice = true;
                                                     else if (orbType == "Exalted Orb" && LowerPriceSettings.RepriceExalted.Value) reprice = true;
                                                     else if (orbType == "Orb of Annulment" && LowerPriceSettings.RepriceAnnul.Value) reprice = true;
+                                                    else if (orbType == "Mirror of Kalandra" && LowerPriceSettings.RepriceMirror.Value) reprice = true;
 
                                                     LogMessage($"LowerPrice DEBUG: Item {processedCount} - Reprice = {reprice}");
                                                     if (!reprice)
@@ -602,6 +603,9 @@ public partial class TradeUtils
             case "Orb of Annulment":
                 // Annul Override: if checked, force flat reduction; if unchecked, use global setting
                 useFlatReduction = LowerPriceSettings.AnnulUseFlat ? true : LowerPriceSettings.UseFlatReduction;
+                break;
+            case "Mirror of Kalandra":
+                useFlatReduction = LowerPriceSettings.MirrorUseFlat ? true : LowerPriceSettings.UseFlatReduction;
                 break;
             default:
                 // Use global setting for unknown currencies

@@ -625,6 +625,10 @@ public class LowerPriceSubSettings
     [IgnoreMenu]
     public ToggleNode RepriceAnnul { get; set; } = new ToggleNode(true);
 
+    [Menu("Reprice Mirror of Kalandra", "Enable repricing for Mirror of Kalandra")]
+    [IgnoreMenu]
+    public ToggleNode RepriceMirror { get; set; } = new ToggleNode(false);
+
     // ===== PRICING STRATEGY =====
     [Menu("Use Flat Reduction", "Use flat number reduction instead of percentage")]
     [IgnoreMenu]
@@ -654,6 +658,10 @@ public class LowerPriceSubSettings
     [Menu("Annul Override", "Force flat reduction for Annul Orbs (overrides global setting)")]
     [IgnoreMenu]
     public ToggleNode AnnulUseFlat { get; set; } = new ToggleNode(true);
+
+    [Menu("Mirror Override", "Force flat reduction for Mirror of Kalandra (overrides global setting)")]
+    [IgnoreMenu]
+    public ToggleNode MirrorUseFlat { get; set; } = new ToggleNode(true);
 
     // ===== SPECIAL ACTIONS =====
     [Menu("Pickup Items at 1 Currency", "Control-left-click items priced at 1 instead of repricing")]
@@ -728,6 +736,7 @@ public class LpCurrencySelectionSubMenu
     [Menu("Reprice Divine Orb")] public ToggleNode RepriceDivine => _p.RepriceDivine;
     [Menu("Reprice Exalted Orb")] public ToggleNode RepriceExalted => _p.RepriceExalted;
     [Menu("Reprice Annul Orb")] public ToggleNode RepriceAnnul => _p.RepriceAnnul;
+    [Menu("Reprice Mirror of Kalandra")] public ToggleNode RepriceMirror => _p.RepriceMirror;
 }
 
 public class LpPricingStrategySubMenu
@@ -747,6 +756,7 @@ public class LpOverridesSubMenu
     [Menu("Chaos Override")] public ToggleNode ChaosUseRatio => _p.ChaosUseRatio;
     [Menu("Exalted Override")] public ToggleNode ExaltedUseRatio => _p.ExaltedUseRatio;
     [Menu("Annul Override")] public ToggleNode AnnulUseFlat => _p.AnnulUseFlat;
+    [Menu("Mirror Override")] public ToggleNode MirrorUseFlat => _p.MirrorUseFlat;
 }
 
 public class LpSpecialActionsSubMenu
