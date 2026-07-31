@@ -42,8 +42,17 @@ public partial class TradeUtils
     // Value display fields
     private readonly HttpClient _lowerPriceHttpClient = new HttpClient();
     private DateTime _lowerPriceLastCurrencyUpdate = DateTime.MinValue;
-    private Dictionary<string, decimal> _lowerPriceCurrencyRates = new Dictionary<string, decimal>();
+
+    // Chaos value of ONE unit of each currency, keyed by the in-game display name
+    // ("Divine Orb" -> 177.9). Everything is summed in chaos and converted once at the end,
+    // which is what the old pairwise "x_to_y" rate table was trying to do — it never worked,
+    // because the poe.ninja parser only ever wrote "<name>_to_chaos" keys while the display
+    // read "chaos_to_divine"-style keys that nothing populated, so every lookup returned 0.
+    private Dictionary<string, decimal> _lowerPriceChaosValues =
+        new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
     private readonly object _lowerPriceCurrencyRatesLock = new object();
+    private int _lowerPriceRatesFetching; // 0 = idle, 1 = a poe.ninja fetch is in flight
+    private bool _lowerPriceValueScanErrorLogged;
 
     private bool LowerPriceMoveCancellationRequested => (Control.MouseButtons & MouseButtons.Right) != 0;
 
@@ -831,25 +840,25 @@ public partial class TradeUtils
     {
         lock (_lowerPriceCurrencyRatesLock)
         {
-            // Initialize with -1 to indicate rates need to be loaded from API
-            _lowerPriceCurrencyRates["chaos_to_divine"] = -1m;
-            _lowerPriceCurrencyRates["chaos_to_exalted"] = -1m;
-            _lowerPriceCurrencyRates["divine_to_chaos"] = -1m;
-            _lowerPriceCurrencyRates["divine_to_exalted"] = -1m;
-            _lowerPriceCurrencyRates["exalted_to_chaos"] = -1m;
-            _lowerPriceCurrencyRates["exalted_to_divine"] = -1m;
-            _lowerPriceCurrencyRates["annul_to_chaos"] = -1m;
-            _lowerPriceCurrencyRates["annul_to_divine"] = -1m;
-            _lowerPriceCurrencyRates["annul_to_exalted"] = -1m;
+            // Chaos is the unit of account, so it is known without the API. Every other
+            // currency stays absent until poe.ninja answers; an absent entry means "unpriced",
+            // which the display reports rather than silently counting as zero.
+            _lowerPriceChaosValues.Clear();
+            _lowerPriceChaosValues["Chaos Orb"] = 1m;
         }
     }
 
     private async Task UpdateLowerPriceCurrencyRates()
     {
         if (!LowerPriceSettings.AutoUpdateRates) return;
-        
+
         var timeSinceUpdate = DateTime.Now - _lowerPriceLastCurrencyUpdate;
         if (timeSinceUpdate.TotalMinutes < LowerPriceSettings.CurrencyUpdateInterval.Value) return;
+
+        // The render loop calls this every frame, so once the interval expires every frame in
+        // flight passes the check above at once and fires its own request. poe.ninja asks callers
+        // to be reasonable with concurrency, so let exactly one fetch run at a time.
+        if (System.Threading.Interlocked.Exchange(ref _lowerPriceRatesFetching, 1) == 1) return;
 
         try
         {
@@ -858,7 +867,11 @@ public partial class TradeUtils
             // repricing works without it, so any failure here is non-fatal (keep default rates).
             JsonDocument jsonDoc = null;
             string league = ResolveLeague();
-            string ninjaUrl = $"https://poe.ninja/api/data/currencyoverview?league={Uri.EscapeDataString(league)}&type=Currency";
+            // poe.ninja's legacy /api/data/currencyoverview and /api/data/itemoverview endpoints
+            // were retired and now answer 404 for every league. The current economy API is
+            // /poe1/api/economy/exchange/current/overview, documented at https://poe.ninja/docs/api.
+            // Responses are HTTP-cached ~5 minutes, so CurrencyUpdateInterval must stay >= 5 (it is).
+            string ninjaUrl = $"https://poe.ninja/poe1/api/economy/exchange/current/overview?league={Uri.EscapeDataString(league)}&type=Currency";
             try
             {
                 using (var ninjaReq = new HttpRequestMessage(HttpMethod.Get, ninjaUrl))
@@ -873,7 +886,7 @@ public partial class TradeUtils
                         }
                         else
                         {
-                            LogMessage($"LowerPrice: poe.ninja returned HTTP {(int)ninjaResp.StatusCode} for league '{league}'. Currency value display is unavailable (percentage repricing is unaffected). poe.ninja's data API may have moved — see README.");
+                            LogMessage($"LowerPrice: poe.ninja returned HTTP {(int)ninjaResp.StatusCode} for league '{league}'. Currency value display is unavailable (percentage repricing is unaffected).");
                         }
                     }
                 }
@@ -904,33 +917,72 @@ public partial class TradeUtils
                     return; // Keep default rates; non-fatal.
             }
             
-            lock (_lowerPriceCurrencyRatesLock)
+            // The economy API splits the data in two: "items" maps a currency id to its display
+            // name ("annul" -> "Orb of Annulment"), "lines" maps that id to its chaos price
+            // ("annul" -> 12.14). Joining them gives a name-keyed table that matches the orb
+            // names read off the item tooltips verbatim, so every currency is priceable rather
+            // than only the four that used to be hardcoded.
+            var idToName = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            if (jsonDoc.RootElement.TryGetProperty("items", out var itemsEl) &&
+                itemsEl.ValueKind == JsonValueKind.Array)
             {
-                // Parse poe.ninja currency data for POE1 format
-                if (jsonDoc.RootElement.TryGetProperty("lines", out var lines))
+                foreach (var item in itemsEl.EnumerateArray())
                 {
-                    foreach (var line in lines.EnumerateArray())
+                    if (item.TryGetProperty("id", out var idEl) &&
+                        item.TryGetProperty("name", out var nameEl))
                     {
-                        if (line.TryGetProperty("currencyTypeName", out var currName) &&
-                            line.TryGetProperty("chaosEquivalent", out var chaosEq))
-                        {
-                            string currency = currName.GetString();
-                            decimal chaosValue = chaosEq.GetDecimal();
-                            
-                            if (chaosValue > 0)
-                            {
-                                _lowerPriceCurrencyRates[$"{currency.ToLower()}_to_chaos"] = chaosValue;
-                            }
-                        }
+                        var id = idEl.GetString();
+                        var name = nameEl.GetString();
+                        if (!string.IsNullOrWhiteSpace(id) && !string.IsNullOrWhiteSpace(name))
+                            idToName[id] = name;
                     }
                 }
             }
-            
+
+            var parsed = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
+            if (jsonDoc.RootElement.TryGetProperty("lines", out var lines) &&
+                lines.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var line in lines.EnumerateArray())
+                {
+                    if (!line.TryGetProperty("id", out var idEl) ||
+                        !line.TryGetProperty("primaryValue", out var valEl))
+                        continue;
+
+                    var id = idEl.GetString();
+                    if (string.IsNullOrWhiteSpace(id)) continue;
+                    if (!idToName.TryGetValue(id, out var name)) continue;
+                    if (valEl.ValueKind != JsonValueKind.Number) continue;
+
+                    var chaosValue = valEl.GetDecimal();
+                    if (chaosValue > 0)
+                        parsed[name] = chaosValue;
+                }
+            }
+
+            if (parsed.Count == 0)
+            {
+                // poe.ninja answers 200 with an empty payload for a league it doesn't know, so an
+                // empty result means a bad league name far more often than a dead market.
+                LogMessage($"LowerPrice: poe.ninja returned no currency prices for league '{league}'. Check that the league name is correct; value totals will show as unavailable.");
+                return;
+            }
+
+            lock (_lowerPriceCurrencyRatesLock)
+            {
+                _lowerPriceChaosValues = parsed;
+                _lowerPriceChaosValues["Chaos Orb"] = 1m;
+            }
+
             _lowerPriceLastCurrencyUpdate = DateTime.Now;
         }
         catch (Exception ex)
         {
             LogError($"Failed to update currency rates: {ex.Message}");
+        }
+        finally
+        {
+            System.Threading.Interlocked.Exchange(ref _lowerPriceRatesFetching, 0);
         }
     }
 
@@ -969,17 +1021,21 @@ public partial class TradeUtils
             var displayText = $"Items in tab: {itemValues.ItemsWithPricing}/{totalItemsInTab}\n";
             displayText += $"Items for sale: {itemValues.TotalItems}\n";
             
-            if (itemValues.ChaosTotal > 0)
-                displayText += $"Chaos: {itemValues.ChaosTotal:F0}\n";
-            if (itemValues.DivineTotal > 0)
-                displayText += $"Divines: {itemValues.DivineTotal:F1}\n";
-            if (itemValues.ExaltedTotal > 0)
-                displayText += $"Exalts: {itemValues.ExaltedTotal:F1}\n";
-            if (itemValues.AnnulTotal > 0)
-                displayText += $"Annuls: {itemValues.AnnulTotal:F0}\n";
-            
-            displayText += $"\nTotal in Divine: {itemValues.TotalInDivine:F1}\n";
-            displayText += $"Total in Exalts: {itemValues.TotalInExalted:F1}";
+            // Breakdown, most valuable currency first.
+            foreach (var orb in itemValues.OrbTotals
+                         .OrderByDescending(o => GetLowerPriceChaosValue(o.Key) * o.Value)
+                         .ThenBy(o => o.Key))
+            {
+                displayText += $"{orb.Key}: {orb.Value:N0}\n";
+            }
+
+            displayText += $"\nTotal in Chaos: {itemValues.TotalInChaos:N0}\n";
+            displayText += itemValues.DivineRateKnown
+                ? $"Total in Divine: {itemValues.TotalInDivine:F2}"
+                : "Total in Divine: rates unavailable";
+
+            if (itemValues.UnpricedItems > 0)
+                displayText += $"\n({itemValues.UnpricedItems} item(s) in an unpriced currency)";
             
             // Warning if tooltip count doesn't match total items
             if (items != null)
@@ -1006,7 +1062,13 @@ public partial class TradeUtils
         }
     }
 
-    private ItemValueSummary CalculateLowerPriceItemValues(IEnumerable<dynamic> items)
+    // Takes the concrete element type rather than IEnumerable<dynamic> on purpose. With dynamic,
+    // every member access below binds at runtime, and C# cannot resolve EXTENSION methods on a
+    // dynamic receiver — so `child1.Children.Last()` threw RuntimeBinderException ("IList<Element>
+    // does not contain a definition for 'Last'") for every single item. The per-item
+    // catch swallowed it, so the panel silently reported 0 priced items no matter what was in the
+    // tab. Statically typed, Last() resolves normally.
+    private ItemValueSummary CalculateLowerPriceItemValues(IEnumerable<NormalInventoryItem> items)
     {
         var summary = new ItemValueSummary();
         var totalItemsProcessed = 0;
@@ -1086,44 +1148,35 @@ public partial class TradeUtils
                     
                     itemsWithPricing++;
                     summary.TotalItems++;
-            
-                    lock (_lowerPriceCurrencyRatesLock)
-                    {
-                        switch (orbType)
-                        {
-                            case "Chaos Orb":
-                                summary.ChaosTotal += price;
-                                summary.TotalInDivine += price * GetLowerPriceRate("chaos_to_divine");
-                                summary.TotalInExalted += price * GetLowerPriceRate("chaos_to_exalted");
-                                break;
-                            case "Divine Orb":
-                                summary.DivineTotal += price;
-                                summary.TotalInDivine += price;
-                                summary.TotalInExalted += price * GetLowerPriceRate("divine_to_exalted");
-                                break;
-                            case "Exalted Orb":
-                                summary.ExaltedTotal += price;
-                                summary.TotalInDivine += price * GetLowerPriceRate("exalted_to_divine");
-                                summary.TotalInExalted += price;
-                                break;
-                            case "Orb of Annulment":
-                                summary.AnnulTotal += price;
-                                summary.TotalInDivine += price * GetLowerPriceRate("annul_to_divine");
-                                summary.TotalInExalted += price * GetLowerPriceRate("annul_to_exalted");
-                                break;
-                        }
-                    }
+
+                    // Per-currency breakdown, keyed by whatever orb the item is actually priced
+                    // in. The old code only recognised four hardcoded orbs and dropped the rest.
+                    summary.OrbTotals.TryGetValue(orbType, out var orbSoFar);
+                    summary.OrbTotals[orbType] = orbSoFar + price;
+
+                    var chaosEach = GetLowerPriceChaosValue(orbType);
+                    if (chaosEach > 0)
+                        summary.TotalInChaos += price * chaosEach;
+                    else
+                        summary.UnpricedItems++;
                 }
-                catch
+                catch (Exception ex)
                 {
-                    // Skip this item if any error occurs
+                    // Skip this item, but say so once per session. Swallowing this silently is
+                    // exactly how the RuntimeBinderException above went unnoticed: the panel just
+                    // reported "0 items priced" forever with no error anywhere.
+                    if (!_lowerPriceValueScanErrorLogged)
+                    {
+                        _lowerPriceValueScanErrorLogged = true;
+                        LogError($"LowerPrice value display: failed to read a price from an item ({ex.GetType().Name}: {ex.Message}). The stash tooltip layout may have changed; totals will be incomplete.");
+                    }
                     continue;
                 }
             }
         }
-        catch
+        catch (Exception ex)
         {
-            // If any major error occurs, return current summary
+            LogError($"LowerPrice value display: item scan aborted ({ex.Message}).");
             return summary;
         }
         
@@ -1131,23 +1184,23 @@ public partial class TradeUtils
         summary.TotalItemsProcessed = totalItemsProcessed;
         summary.ItemsWithTooltips = itemsWithTooltips;
         summary.ItemsWithPricing = itemsWithPricing;
-        
+
+        // Convert the chaos total once, at the end, rather than per item.
+        var divineInChaos = GetLowerPriceChaosValue("Divine Orb");
+        summary.DivineRateKnown = divineInChaos > 0;
+        if (summary.DivineRateKnown)
+            summary.TotalInDivine = summary.TotalInChaos / divineInChaos;
+
         return summary;
     }
 
-    private decimal GetLowerPriceRate(string rateKey)
+    /// <summary>Chaos value of one unit of <paramref name="currencyName"/>, or 0 if unknown.</summary>
+    private decimal GetLowerPriceChaosValue(string currencyName)
     {
+        if (string.IsNullOrWhiteSpace(currencyName)) return 0m;
         lock (_lowerPriceCurrencyRatesLock)
         {
-            if (_lowerPriceCurrencyRates.TryGetValue(rateKey, out var rate))
-            {
-                if (rate == -1m)
-                {
-                    return 0m;
-                }
-                return rate;
-            }
-            return 0m;
+            return _lowerPriceChaosValues.TryGetValue(currencyName.Trim(), out var v) && v > 0 ? v : 0m;
         }
     }
 }
@@ -1158,11 +1211,18 @@ public class ItemValueSummary
     public int TotalItemsProcessed { get; set; }
     public int ItemsWithTooltips { get; set; }
     public int ItemsWithPricing { get; set; }
-    public decimal ChaosTotal { get; set; }
-    public decimal DivineTotal { get; set; }
-    public decimal ExaltedTotal { get; set; }
-    public decimal AnnulTotal { get; set; }
+
+    /// <summary>Sum of asking prices per orb type, e.g. "Divine Orb" -> 12.</summary>
+    public Dictionary<string, decimal> OrbTotals { get; } =
+        new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Items priced in a currency with no known chaos value, so absent from the totals.</summary>
+    public int UnpricedItems { get; set; }
+
+    public decimal TotalInChaos { get; set; }
     public decimal TotalInDivine { get; set; }
-    public decimal TotalInExalted { get; set; }
+
+    /// <summary>False when the divine rate hasn't loaded, so TotalInDivine is meaningless.</summary>
+    public bool DivineRateKnown { get; set; }
 }
 
