@@ -702,6 +702,23 @@ public class LowerPriceSubSettings
     [IgnoreMenu]
     public RangeNode<int> ValueDisplayY { get; set; } = new RangeNode<int>(100, 0, 2000);
 
+    // ===== ALL-TABS STASH VALUE =====
+    [Menu("Show All-Tabs Value", "Display the totals from the last all-tabs stash scan")]
+    [IgnoreMenu]
+    public ToggleNode ShowStashValueDisplay { get; set; } = new ToggleNode(true);
+
+    [Menu("Scan All Tabs Hotkey", "Fetches every stash tab's prices from GGG's API. Rate limited, so use sparingly.")]
+    [IgnoreMenu]
+    public HotkeyNode StashScanHotkey { get; set; } = new HotkeyNode(System.Windows.Forms.Keys.F6);
+
+    [Menu("All-Tabs Display Position X", "X position of the all-tabs value display")]
+    [IgnoreMenu]
+    public RangeNode<int> StashValueDisplayX { get; set; } = new RangeNode<int>(300, 0, 2000);
+
+    [Menu("All-Tabs Display Position Y", "Y position of the all-tabs value display")]
+    [IgnoreMenu]
+    public RangeNode<int> StashValueDisplayY { get; set; } = new RangeNode<int>(100, 0, 2000);
+
     [Menu("Auto-Update Currency Rates", "Automatically fetch currency rates from poe.ninja")]
     [IgnoreMenu]
     public ToggleNode AutoUpdateRates { get; set; } = new ToggleNode(true);
@@ -784,6 +801,10 @@ public class LpValueDisplaySubMenu
     [Menu("Show Value Display")] public ToggleNode ShowValueDisplay => _p.ShowValueDisplay;
     [Menu("Value Display Position X")] public RangeNode<int> ValueDisplayX => _p.ValueDisplayX;
     [Menu("Value Display Position Y")] public RangeNode<int> ValueDisplayY => _p.ValueDisplayY;
+    [Menu("Show All-Tabs Value")] public ToggleNode ShowStashValueDisplay => _p.ShowStashValueDisplay;
+    [Menu("Scan All Tabs Hotkey")] public HotkeyNode StashScanHotkey => _p.StashScanHotkey;
+    [Menu("All-Tabs Display Position X")] public RangeNode<int> StashValueDisplayX => _p.StashValueDisplayX;
+    [Menu("All-Tabs Display Position Y")] public RangeNode<int> StashValueDisplayY => _p.StashValueDisplayY;
 }
 
 public class LpCurrencyRatesSubMenu

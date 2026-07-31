@@ -46,6 +46,7 @@ public partial class TradeUtils
         if (Settings.LowerPrice.Enable.Value)
         {
             RenderLowerPrice();
+            RenderStashValue();
         }
 
         // Render BulkBuy if enabled

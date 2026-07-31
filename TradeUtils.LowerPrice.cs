@@ -1016,40 +1016,64 @@ public partial class TradeUtils
                 return;
             }
 
-            var itemValues = CalculateLowerPriceItemValues(items);
-            
             var pos = new Vector2(LowerPriceSettings.ValueDisplayX.Value, LowerPriceSettings.ValueDisplayY.Value);
-            
-            // Create value display text
             var totalItemsInTab = items?.Count() ?? 0;
-            var displayText = $"Items in tab: {itemValues.ItemsWithPricing}/{totalItemsInTab}\n";
-            displayText += $"Items for sale: {itemValues.TotalItems}\n";
-            
-            // Breakdown, most valuable currency first.
-            foreach (var orb in itemValues.OrbTotals
-                         .OrderByDescending(o => GetLowerPriceChaosValue(o.Key) * o.Value)
-                         .ThenBy(o => o.Key))
-            {
-                displayText += $"{orb.Key}: {orb.Value:N0}\n";
-            }
 
-            displayText += $"\nTotal in Chaos: {itemValues.TotalInChaos:N0}\n";
-            displayText += itemValues.DivineRateKnown
-                ? $"Total in Divine: {itemValues.TotalInDivine:F2}"
-                : "Total in Divine: rates unavailable";
+            // Prefer the last all-tabs scan for this tab. Reading prices out of the game means
+            // reading hover tooltips, and the client doesn't build a tooltip until you actually
+            // hover the item — so the in-game path can only ever see what you've already touched.
+            // The API scan has every price whether or not you hovered anything.
+            var scanned = GetScannedValueForOpenTab();
+            var divineInChaos = GetLowerPriceChaosValue("Divine Orb");
 
-            if (itemValues.UnpricedItems > 0)
-                displayText += $"\n({itemValues.UnpricedItems} item(s) in an unpriced currency)";
-            
-            // Warning if tooltip count doesn't match total items
-            if (items != null)
+            string displayText;
+            if (scanned != null)
             {
-                var itemsWithTooltips = items.Where(i => i.Tooltip != null).Count();
-                var totalItems = items.Count();
-                
-                if (itemsWithTooltips < totalItems)
+                displayText = $"Items in tab: {scanned.ItemsPriced}/{totalItemsInTab}  (scanned)\n";
+
+                foreach (var orb in scanned.OrbTotals
+                             .OrderByDescending(o => GetLowerPriceChaosValue(o.Key) * o.Value)
+                             .ThenBy(o => o.Key))
                 {
-                    displayText += $"\n⚠️ Hover over items to load pricing data!";
+                    displayText += $"{orb.Key}: {orb.Value:N0}\n";
+                }
+
+                displayText += $"\nTotal in Chaos: {scanned.ChaosTotal:N0}\n";
+                displayText += divineInChaos > 0
+                    ? $"Total in Divine: {scanned.ChaosTotal / divineInChaos:F2}"
+                    : "Total in Divine: rates unavailable";
+
+                if (scanned.UnpricedItems > 0)
+                    displayText += $"\n({scanned.UnpricedItems} item(s) in an unpriced currency)";
+            }
+            else
+            {
+                var itemValues = CalculateLowerPriceItemValues(items);
+
+                displayText = $"Items in tab: {itemValues.ItemsWithPricing}/{totalItemsInTab}\n";
+                displayText += $"Items for sale: {itemValues.TotalItems}\n";
+
+                // Breakdown, most valuable currency first.
+                foreach (var orb in itemValues.OrbTotals
+                             .OrderByDescending(o => GetLowerPriceChaosValue(o.Key) * o.Value)
+                             .ThenBy(o => o.Key))
+                {
+                    displayText += $"{orb.Key}: {orb.Value:N0}\n";
+                }
+
+                displayText += $"\nTotal in Chaos: {itemValues.TotalInChaos:N0}\n";
+                displayText += itemValues.DivineRateKnown
+                    ? $"Total in Divine: {itemValues.TotalInDivine:F2}"
+                    : "Total in Divine: rates unavailable";
+
+                if (itemValues.UnpricedItems > 0)
+                    displayText += $"\n({itemValues.UnpricedItems} item(s) in an unpriced currency)";
+
+                // Only relevant on the tooltip path; a scan makes hovering unnecessary.
+                if (items != null && items.Count(i => i.Tooltip != null) < totalItemsInTab)
+                {
+                    displayText += $"\n⚠️ Not scanned — hover items, or press " +
+                                   $"{LowerPriceSettings.StashScanHotkey.Value} to scan all tabs.";
                 }
             }
 
