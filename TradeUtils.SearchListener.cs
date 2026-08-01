@@ -461,7 +461,7 @@ public partial class TradeUtils
                         }
 
                         // BURST PROTECTION: Queue items instead of processing immediately
-                        if (_parent.Settings.LiveSearch.RateLimiting.BurstProtection.Value)
+                        if (true)
                         {
                             logMessage($"🔄 BURST PROTECTION ENABLED: Queueing fetch token");
                             _parent.QueueItemsForProcessing(itemIds, logMessage, logError, sessionId, this);
@@ -497,7 +497,7 @@ public partial class TradeUtils
                         }
 
                         // BURST PROTECTION: Queue items instead of processing immediately
-                        if (_parent.Settings.LiveSearch.RateLimiting.BurstProtection.Value)
+                        if (true)
                         {
                             logMessage($"🔄 BURST PROTECTION ENABLED: Queueing {wsResponse.New.Length} items");
                             _parent.QueueItemsForProcessing(wsResponse.New, logMessage, logError, sessionId, this);
@@ -731,7 +731,7 @@ public partial class TradeUtils
                                     };
 
                                     _parent._recentItems.Enqueue(recentItem);
-                                    while (_parent._recentItems.Count > _parent.Settings.LiveSearch.SearchSettings.MaxRecentItems.Value)
+                                    while (_parent._recentItems.Count > MaxRecentItems)
                                         _parent._recentItems.Dequeue();
                                     
                                     // Log search result to file if enabled

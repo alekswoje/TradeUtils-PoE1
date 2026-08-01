@@ -30,6 +30,20 @@ public partial class TradeUtils
     /// <summary>Display name the client uses for chaos, on tooltips and in the currency dropdown.</summary>
     private const string ChaosOrbName = "Chaos Orb";
 
+    // Fixed values that used to be settings. They were knobs nobody needs to turn, and the menu had
+    // grown to the point where the handful that do matter were hard to find.
+    private const int LowerPriceTimerMinutes = 60;
+    private const int LowerPriceRateRefreshMinutes = 30; // poe.ninja caches ~5 min, so stay well above it
+    private const int LowerPriceValueDisplayX = 10;
+    private const int LowerPriceValueDisplayY = 100;
+    private const int LowerPriceStashValueDisplayX = 300;
+    private const int LowerPriceStashValueDisplayY = 100;
+    private const int LowerPriceStepDownMaxAmount = 10000;
+
+    /// <summary>Humanised pause between UI actions, drawn fresh each time it's read.</summary>
+    private int LowerPriceStepDelayMs =>
+        ActionDelayWithJitterMs;
+
     // LowerPrice-specific fields
     private readonly ConcurrentDictionary<RectangleF, bool?> _lowerPriceMouseStateForRect = new();
     private readonly Random _lowerPriceRandom = new Random();
@@ -138,7 +152,7 @@ public partial class TradeUtils
             CheckLowerPriceHotkeys();
 
             // Render timer display
-            if (LowerPriceSettings.EnableTimer.Value && LowerPriceSettings.ShowTimerCountdown.Value)
+            if (LowerPriceSettings.EnableTimer.Value)
             {
                 RenderLowerPriceTimerDisplay();
             }
@@ -390,7 +404,7 @@ public partial class TradeUtils
                     {
                         LogMessage($"LowerPrice DEBUG: Item {processedCount} - Skipping (has 2 children)");
                         await TaskUtils.NextFrame();
-                        await Task.Delay(LowerPriceSettings.ActionDelay.Value + _lowerPriceRandom.Next(LowerPriceSettings.RandomDelay.Value));
+                        await Task.Delay(LowerPriceStepDelayMs);
                         continue;
                     }
 
@@ -403,7 +417,7 @@ public partial class TradeUtils
                     LogMessage($"LowerPrice DEBUG: Item {processedCount} - Moving mouse to position ({position.X}, {position.Y})");
                     Utility.Mouse.moveMouse(position);
                     await TaskUtils.NextFrame();
-                    await Task.Delay(LowerPriceSettings.ActionDelay.Value + _lowerPriceRandom.Next(LowerPriceSettings.RandomDelay.Value));
+                    await Task.Delay(LowerPriceStepDelayMs);
 
                     // Check if item is locked before processing
                     if (IsLowerPriceItemLocked(item))
@@ -411,7 +425,7 @@ public partial class TradeUtils
                         LogMessage($"LowerPrice DEBUG: Item {processedCount} - Skipping (locked)");
                         skippedLocked++;
                         await TaskUtils.NextFrame();
-                        await Task.Delay(LowerPriceSettings.ActionDelay.Value + _lowerPriceRandom.Next(LowerPriceSettings.RandomDelay.Value));
+                        await Task.Delay(LowerPriceStepDelayMs);
                         continue;
                     }
 
@@ -460,12 +474,15 @@ public partial class TradeUtils
                                                 {
                                                     string orbType = priceChild1.Children.Count > 2 ? priceChild1.Children[2].Text : null;
                                                     LogMessage($"LowerPrice DEBUG: Item {processedCount} - OldPrice = {oldPrice}, OrbType = '{orbType}'");
-                                                    bool reprice = false;
-                                                    if (orbType == "Chaos Orb" && LowerPriceSettings.RepriceChaos.Value) reprice = true;
-                                                    else if (orbType == "Divine Orb" && LowerPriceSettings.RepriceDivine.Value) reprice = true;
-                                                    else if (orbType == "Exalted Orb" && LowerPriceSettings.RepriceExalted.Value) reprice = true;
-                                                    else if (orbType == "Orb of Annulment" && LowerPriceSettings.RepriceAnnul.Value) reprice = true;
-                                                    else if (orbType == "Mirror of Kalandra" && LowerPriceSettings.RepriceMirror.Value) reprice = true;
+                                                    // Everything priced in a currency we can read is repriced, except that
+                                                    // Divine and Mirror listings each keep an opt-out — those are the ones
+                                                    // where an automated mistake is worth the most.
+                                                    bool reprice = orbType switch
+                                                    {
+                                                        "Divine Orb" => LowerPriceSettings.RepriceDivine.Value,
+                                                        "Mirror of Kalandra" => LowerPriceSettings.RepriceMirror.Value,
+                                                        _ => !string.IsNullOrWhiteSpace(orbType),
+                                                    };
 
                                                     LogMessage($"LowerPrice DEBUG: Item {processedCount} - Reprice = {reprice}");
                                                     if (!reprice)
@@ -509,7 +526,7 @@ public partial class TradeUtils
                                                                 }
 
                                                                 await TaskUtils.NextFrame();
-                                                                await Task.Delay(LowerPriceSettings.ActionDelay.Value + _lowerPriceRandom.Next(LowerPriceSettings.RandomDelay.Value));
+                                                                await Task.Delay(LowerPriceStepDelayMs);
                                                                 continue;
                                                             }
 
@@ -530,16 +547,16 @@ public partial class TradeUtils
                                                             LogMessage($"LowerPrice DEBUG: Item {processedCount} - Picking up item");
                                                             Utility.Keyboard.KeyDown(Keys.LControlKey);
                                                             await TaskUtils.NextFrame();
-                                                            await Task.Delay(LowerPriceSettings.ActionDelay.Value + _lowerPriceRandom.Next(LowerPriceSettings.RandomDelay.Value));
+                                                            await Task.Delay(LowerPriceStepDelayMs);
                                                             Utility.Mouse.LeftDown();
                                                             await TaskUtils.NextFrame();
-                                                            await Task.Delay(LowerPriceSettings.ActionDelay.Value + _lowerPriceRandom.Next(LowerPriceSettings.RandomDelay.Value));
+                                                            await Task.Delay(LowerPriceStepDelayMs);
                                                             Utility.Mouse.LeftUp();
                                                             await TaskUtils.NextFrame();
-                                                            await Task.Delay(LowerPriceSettings.ActionDelay.Value + _lowerPriceRandom.Next(LowerPriceSettings.RandomDelay.Value));
+                                                            await Task.Delay(LowerPriceStepDelayMs);
                                                             Utility.Keyboard.KeyUp(Keys.LControlKey);
                                                             await TaskUtils.NextFrame();
-                                                            await Task.Delay(LowerPriceSettings.ActionDelay.Value + _lowerPriceRandom.Next(LowerPriceSettings.RandomDelay.Value));
+                                                            await Task.Delay(LowerPriceStepDelayMs);
                                                             pickedUp++;
                                                         }
                                                         continue;
@@ -549,16 +566,16 @@ public partial class TradeUtils
                                                     LogMessage($"LowerPrice DEBUG: Item {processedCount} - Repricing from {oldPrice} to {newPrice}");
                                                     Utility.Mouse.RightDown();
                                                     await TaskUtils.NextFrame();
-                                                    await Task.Delay(LowerPriceSettings.ActionDelay.Value + _lowerPriceRandom.Next(LowerPriceSettings.RandomDelay.Value));
+                                                    await Task.Delay(LowerPriceStepDelayMs);
                                                     Utility.Mouse.RightUp();
                                                     await TaskUtils.NextFrame();
-                                                    await Task.Delay(LowerPriceSettings.ActionDelay.Value + _lowerPriceRandom.Next(LowerPriceSettings.RandomDelay.Value));
+                                                    await Task.Delay(LowerPriceStepDelayMs);
                                                     Utility.Keyboard.Type($"{newPrice}");
                                                     await TaskUtils.NextFrame();
-                                                    await Task.Delay(LowerPriceSettings.ActionDelay.Value + _lowerPriceRandom.Next(LowerPriceSettings.RandomDelay.Value));
+                                                    await Task.Delay(LowerPriceStepDelayMs);
                                                     Utility.Keyboard.KeyPress(Keys.Enter);
                                                     await TaskUtils.NextFrame();
-                                                    await Task.Delay(LowerPriceSettings.ActionDelay.Value + _lowerPriceRandom.Next(LowerPriceSettings.RandomDelay.Value));
+                                                    await Task.Delay(LowerPriceStepDelayMs);
                                                     repriced++;
                                                     LogMessage($"LowerPrice DEBUG: Item {processedCount} - Successfully repriced!");
                                                     
@@ -618,7 +635,7 @@ public partial class TradeUtils
                     }
 
                     await TaskUtils.NextFrame();
-                    await Task.Delay(LowerPriceSettings.ActionDelay.Value + _lowerPriceRandom.Next(LowerPriceSettings.RandomDelay.Value));
+                    await Task.Delay(LowerPriceStepDelayMs);
                 }
                 catch (Exception ex)
                 {
@@ -648,56 +665,19 @@ public partial class TradeUtils
         }
     }
 
+    /// <summary>
+    /// The reduced price for a listing, by whichever strategy is configured.
+    ///
+    /// There used to be five per-currency "Override" toggles here, all of which forced flat
+    /// reduction despite three of them being named *UseRatio — so with the shipped defaults a
+    /// Chaos listing dropped by 1 flat while the Price Ratio slider sat there looking like it was
+    /// in charge. One strategy for every currency is both simpler and honest about what it does.
+    /// </summary>
     private float CalculateLowerPriceNewPrice(int oldPrice, string orbType)
     {
-        if (UsesFlatLowerPriceReduction(orbType))
-        {
-            return oldPrice - LowerPriceSettings.FlatReductionAmount.Value;
-        }
-        else
-        {
-            return (float)Math.Floor(oldPrice * LowerPriceSettings.PriceRatio.Value);
-        }
-    }
-
-    /// <summary>
-    /// Whether <paramref name="orbType"/> is reduced by a flat amount rather than by the ratio.
-    /// Split out of CalculateLowerPriceNewPrice so the Chaos conversion can apply the exact same
-    /// rule the Chaos Orb path would have applied to a natively Chaos-priced item.
-    /// </summary>
-    private bool UsesFlatLowerPriceReduction(string orbType)
-    {
-        bool useFlatReduction = false;
-
-        // Check for currency-specific overrides first
-        switch (orbType)
-        {
-            case "Divine Orb":
-                // Divine Override: if checked, force flat reduction; if unchecked, use global setting
-                useFlatReduction = LowerPriceSettings.DivineUseFlat ? true : LowerPriceSettings.UseFlatReduction;
-                break;
-            case "Chaos Orb":
-                // Chaos Override: if checked, force flat reduction; if unchecked, use global setting
-                useFlatReduction = LowerPriceSettings.ChaosUseRatio ? true : LowerPriceSettings.UseFlatReduction;
-                break;
-            case "Exalted Orb":
-                // Exalted Override: if checked, force flat reduction; if unchecked, use global setting
-                useFlatReduction = LowerPriceSettings.ExaltedUseRatio ? true : LowerPriceSettings.UseFlatReduction;
-                break;
-            case "Orb of Annulment":
-                // Annul Override: if checked, force flat reduction; if unchecked, use global setting
-                useFlatReduction = LowerPriceSettings.AnnulUseFlat ? true : LowerPriceSettings.UseFlatReduction;
-                break;
-            case "Mirror of Kalandra":
-                useFlatReduction = LowerPriceSettings.MirrorUseFlat ? true : LowerPriceSettings.UseFlatReduction;
-                break;
-            default:
-                // Use global setting for unknown currencies
-                useFlatReduction = LowerPriceSettings.UseFlatReduction;
-                break;
-        }
-
-        return useFlatReduction;
+        return LowerPriceSettings.UseFlatReduction.Value
+            ? oldPrice - LowerPriceSettings.FlatReductionAmount.Value
+            : (float)Math.Floor(oldPrice * LowerPriceSettings.PriceRatio.Value);
     }
 
     /// <summary>
@@ -786,7 +766,7 @@ public partial class TradeUtils
 
         // Reduce by whatever rule the target currency uses, so a stepped-down listing and one that
         // was always priced in that currency move by the same amount from here on.
-        var reduced = UsesFlatLowerPriceReduction(targetOrb)
+        var reduced = LowerPriceSettings.UseFlatReduction.Value
             ? equivalent - LowerPriceSettings.FlatReductionAmount.Value
             : Math.Floor(equivalent * (decimal)LowerPriceSettings.PriceRatio.Value);
 
@@ -801,7 +781,7 @@ public partial class TradeUtils
             return 0;
         }
 
-        var cap = LowerPriceSettings.StepDownMaxAmount.Value;
+        var cap = LowerPriceStepDownMaxAmount;
         if (newPrice > cap)
         {
             reason = $"the converted amount ({newPrice}x {targetOrb}) is above the {cap} cap";
@@ -843,7 +823,7 @@ public partial class TradeUtils
 
         // Two intervals of slack: one missed refresh is normal, a run of them means the fetch is
         // failing and the numbers are drifting away from the market.
-        var maxAge = TimeSpan.FromMinutes(LowerPriceSettings.CurrencyUpdateInterval.Value * 2);
+        var maxAge = TimeSpan.FromMinutes(LowerPriceRateRefreshMinutes * 2);
         var age = DateTime.Now - _lowerPriceLastCurrencyUpdate;
         if (age > maxAge)
         {
@@ -1259,7 +1239,7 @@ public partial class TradeUtils
     private async Task LowerPriceActionStep()
     {
         await TaskUtils.NextFrame();
-        await Task.Delay(LowerPriceSettings.ActionDelay.Value + _lowerPriceRandom.Next(LowerPriceSettings.RandomDelay.Value));
+        await Task.Delay(LowerPriceStepDelayMs);
     }
 
     private static async Task<bool> WaitForLowerPriceCondition(Func<bool> condition, int timeoutMs)
@@ -1427,7 +1407,7 @@ public partial class TradeUtils
             }
 
             var timeSinceLastReprice = DateTime.Now - _lowerPriceLastRepriceTime;
-            var timerDuration = TimeSpan.FromMinutes(LowerPriceSettings.TimerDurationMinutes.Value);
+            var timerDuration = TimeSpan.FromMinutes(LowerPriceTimerMinutes);
             var timeRemaining = timerDuration - timeSinceLastReprice;
 
             if (timeRemaining <= TimeSpan.Zero)
@@ -1436,10 +1416,7 @@ public partial class TradeUtils
                 if (!_lowerPriceTimerExpired)
                 {
                     _lowerPriceTimerExpired = true;
-                    if (LowerPriceSettings.EnableSoundNotification.Value)
-                    {
-                        PlayLowerPriceSoundNotification();
-                    }
+                    PlayLowerPriceSoundNotification();
                 }
                 
                 var pos = new Vector2(10, 60);
@@ -1512,7 +1489,8 @@ public partial class TradeUtils
 
     private async Task UpdateLowerPriceCurrencyRates()
     {
-        if (!LowerPriceSettings.AutoUpdateRates) return;
+        // Rates always refresh. Leaving them stale is never what anyone wanted, and the step-down
+        // refuses to price against an old table anyway.
 
         // Resolve the league before the interval check, not after. Prices are only meaningful for
         // one league, so a league that has since resolved has to invalidate the table immediately
@@ -1523,7 +1501,7 @@ public partial class TradeUtils
         var leagueChanged = !string.Equals(league, _lowerPriceRatesLeague, StringComparison.OrdinalIgnoreCase);
 
         var timeSinceUpdate = DateTime.Now - _lowerPriceLastCurrencyUpdate;
-        if (!leagueChanged && timeSinceUpdate.TotalMinutes < LowerPriceSettings.CurrencyUpdateInterval.Value) return;
+        if (!leagueChanged && timeSinceUpdate.TotalMinutes < LowerPriceRateRefreshMinutes) return;
         if (DateTime.Now < _lowerPriceRatesNextAttempt) return;
 
         // The render loop calls this every frame, so once the interval expires every frame in
@@ -1690,7 +1668,7 @@ public partial class TradeUtils
                 return;
             }
 
-            var pos = new Vector2(LowerPriceSettings.ValueDisplayX.Value, LowerPriceSettings.ValueDisplayY.Value);
+            var pos = new Vector2(LowerPriceValueDisplayX, LowerPriceValueDisplayY);
             var totalItemsInTab = items?.Count() ?? 0;
 
             // Prefer the last all-tabs scan for this tab. Reading prices out of the game means

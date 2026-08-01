@@ -67,7 +67,7 @@ public partial class TradeUtils
         if (LowerPriceSettings.StashScanHotkey.PressedOnce())
             _ = Task.Run(ScanAllStashTabsAsync);
 
-        if (LowerPriceSettings.ShowStashValueDisplay.Value)
+        if (LowerPriceSettings.ShowValueDisplay.Value)
             RenderStashValueDisplay();
     }
 
@@ -465,8 +465,8 @@ public partial class TradeUtils
             if (!scanning && lastScan != DateTime.MinValue)
                 text += $"\nScanned {lastScan:HH:mm}";
 
-            var pos = new Vector2(LowerPriceSettings.StashValueDisplayX.Value,
-                                  LowerPriceSettings.StashValueDisplayY.Value);
+            var pos = new Vector2(LowerPriceStashValueDisplayX,
+                                  LowerPriceStashValueDisplayY);
             var size = Graphics.MeasureText(text);
             Graphics.DrawBox(new RectangleF(pos.X - 5, pos.Y - 5, size.X + 10, size.Y + 10),
                              new SharpDX.Color(0, 0, 0, 180));

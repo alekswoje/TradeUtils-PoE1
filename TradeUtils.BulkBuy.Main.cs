@@ -52,7 +52,7 @@ public partial class TradeUtils
                 _rateLimiter = new QuotaGuard(LogMessage, LogError, () => LiveSearchSettings);
             }
 
-            var bulkSession = Settings.BulkBuy.SessionId?.Value ?? "";
+            var bulkSession = Settings.LiveSearch.SessionId?.Value ?? "";
             if (string.IsNullOrWhiteSpace(bulkSession))
             {
                 LogMessage("❌ BulkBuy: POESESSID is empty. Set it in Bulk Buy Settings > General > POESESSID (BulkBuy).");
@@ -114,9 +114,9 @@ public partial class TradeUtils
                 _bulkBuyPausedForFocus = false;
             }
 
-            if (Settings.BulkBuy.General != null)
+            if (Settings.BulkBuy != null)
             {
-                var toggleKey = Settings.BulkBuy.General.ToggleHotkey?.Value ?? Keys.None;
+                var toggleKey = Settings.BulkBuy.ToggleHotkey?.Value ?? Keys.None;
                 if (toggleKey != Keys.None)
                 {
                     bool currentStartState = Input.GetKeyState(toggleKey);
@@ -138,7 +138,7 @@ public partial class TradeUtils
                 }
             }
 
-            if (BulkBuySettings.StopAllHotkey.Value != Keys.None && Input.GetKeyState(BulkBuySettings.StopAllHotkey.Value))
+            if (Settings.LiveSearch.General.StopAllHotkey.Value != Keys.None && Input.GetKeyState(Settings.LiveSearch.General.StopAllHotkey.Value))
             {
                 StopBulkBuy();
             }
@@ -186,7 +186,7 @@ public partial class TradeUtils
                 return;
             }
 
-            var sessionId = Settings.BulkBuy.SessionId?.Value ?? "";
+            var sessionId = Settings.LiveSearch.SessionId?.Value ?? "";
             if (string.IsNullOrWhiteSpace(sessionId))
             {
                 LogError("BulkBuy: Cannot start - POESESSID is empty. Configure it in Bulk Buy Settings > General > POESESSID (BulkBuy).");
@@ -948,7 +948,7 @@ public partial class TradeUtils
                     LogMessage($"BulkBuy: Failed to buy '{bulkItem.Name}' after 5 attempts (currency failure count: {_bulkBuyCurrencyFailureCount}/2, total failed: {Settings.BulkBuy.FailedPurchases})");
                     
                     // Check if we should stop after X failed items
-                    int stopAfterFailed = Settings.BulkBuy.StopAfterFailedItems?.Value ?? 0;
+                    int stopAfterFailed = 0;
                     if (stopAfterFailed > 0 && Settings.BulkBuy.FailedPurchases >= stopAfterFailed)
                     {
                         LogMessage($"🛑 BulkBuy: Stopping after {Settings.BulkBuy.FailedPurchases} failed items (limit: {stopAfterFailed})");
@@ -1295,7 +1295,7 @@ public partial class TradeUtils
             }
             
             // Verify item if enabled (experimental feature)
-            if (Settings.BulkBuy.EnableItemVerification.Value)
+            if (false)
             {
                 // Ctrl+C to copy item info and verify it matches
                 bool verified = await VerifyItemFromClipboardAsync(item.Name, item.Price, maxRetries: 1);

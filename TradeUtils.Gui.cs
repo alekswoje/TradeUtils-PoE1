@@ -66,7 +66,7 @@ public partial class TradeUtils
     // Keeping this stub for backwards compatibility but it's not used anymore
     private void RenderLiveSearchGuiOld()
     {
-        if (!Settings.LiveSearch.General.ShowGui.Value) return;
+        if (!true) return;
 
         // Set window position but allow auto-resizing
         ImGui.SetNextWindowPos(Settings.LiveSearch.WindowPosition, ImGuiCond.FirstUseEver);
@@ -281,7 +281,7 @@ public partial class TradeUtils
         ImGui.PopStyleVar(2);
         ImGui.End();
 
-        if (Settings.LiveSearch.General.ShowGui.Value)
+        if (true)
         {
             // REMOVED: Green status text display
             

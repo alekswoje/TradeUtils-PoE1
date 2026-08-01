@@ -11,8 +11,33 @@ namespace TradeUtils;
 
 public partial class TradeUtils
 {
+    // ==================== FIXED TUNING ====================
+    // These were all settings once. They were knobs nobody had a reason to turn, and the sheer
+    // number of them buried the handful that matter. The rate-limit values in particular are a
+    // safety mechanism rather than a preference — letting users raise them only ever earns a ban
+    // from GGG's API.
+
+    private const int SearchQueueDelayMs = 1000;          // between starting live searches
+    private const int MaxRecentItems = 5;
+    private const int BrowserTabDelaySeconds = 5;
+    private const int FastModeClickDelayMs = 100;
+    private const float FastModeClickDurationSec = 2.5f;  // stash data can take ~0.1-3s to load
+    private const int MaxItemsPerSecond = 3;
+    private const int BurstQueueSize = 20;
+    private const int RateLimitSafetyThresholdPercent = 10;
+    private const int MaxRetriesPerItem = 2;              // bulk buy, per failed item
+    private const float UndercutAmount = 0.01f;           // currency exchange ratio undercut
+
+    /// <summary>
+    /// Action delay with a random third added on top, so repeated actions aren't perfectly evenly
+    /// spaced. The jitter used to be its own slider, but nobody ever had a reason to tune it apart
+    /// from the delay it varies.
+    /// </summary>
+    private int ActionDelayWithJitterMs =>
+        Settings.ActionDelay.Value + _random.Next(Settings.ActionDelay.Value / 3 + 1);
+
     // ==================== PRIVATE FIELDS ====================
-    
+
     // Listeners and search management
     private List<SearchListener> _listeners = new List<SearchListener>();
     private SearchListener _activeListener;
@@ -192,7 +217,7 @@ public partial class TradeUtils
     /// </summary>
     protected void LogSearchResult(RecentItem item)
     {
-        if (!LiveSearchSettings.SearchSettings.LogSearchResults.Value) return;
+        if (!true) return;
         
         try
         {
@@ -211,7 +236,7 @@ public partial class TradeUtils
     /// </summary>
     protected void LogSearchResult(Models.ResultItem item)
     {
-        if (!LiveSearchSettings.SearchSettings.LogSearchResults.Value) return;
+        if (!true) return;
         
         try
         {
@@ -259,7 +284,7 @@ public partial class TradeUtils
         lock (_burstLock)
         {
             // Check if queue is getting too large
-            if (_burstQueue.Count >= LiveSearchSettings.RateLimiting.BurstQueueSize.Value)
+            if (_burstQueue.Count >= BurstQueueSize)
             {
                 LogMessage($"⚠️  BURST QUEUE FULL: {_burstQueue.Count} items queued, skipping new items");
                 return;
@@ -311,7 +336,7 @@ public partial class TradeUtils
 
     private string GetPoeSessionForRequests()
     {
-        var bulk = Settings?.BulkBuy?.SessionId?.Value;
+        var bulk = Settings?.LiveSearch?.SessionId?.Value;
         if (!string.IsNullOrWhiteSpace(bulk))
             return bulk;
 

@@ -41,10 +41,10 @@ public partial class TradeUtils
             
             LogMessage("=== Currency Exchange Initialization Complete ===");
             LogMessage($"Configuration:");
-            LogMessage($"  - Debug Mode: {CurrencyExchangeSettings.DebugMode.Value}");
-            LogMessage($"  - Show Button: {CurrencyExchangeSettings.ShowButton.Value}");
+            LogMessage($"  - Debug Mode: {Settings.LiveSearch.General.DebugMode.Value}");
+            LogMessage($"  - Show Button: {true}");
             LogMessage($"  - Auto Undercut: {CurrencyExchangeSettings.AutoUndercut.Value}");
-            LogMessage($"  - Undercut Amount: {CurrencyExchangeSettings.UndercutAmount.Value}");
+            LogMessage($"  - Undercut Amount: {UndercutAmount}");
         }
         catch (Exception ex)
         {
@@ -63,9 +63,9 @@ public partial class TradeUtils
                 return;
             }
             
-            if (!CurrencyExchangeSettings.ShowButton.Value)
+            if (!true)
             {
-                if (CurrencyExchangeSettings.DebugMode.Value)
+                if (Settings.LiveSearch.General.DebugMode.Value)
                     LogMessage("CurrencyExchange: button hidden because 'Show Button' is OFF (enable it in Currency Exchange settings).");
                 return;
             }
@@ -251,12 +251,12 @@ public partial class TradeUtils
                 LogMessage($"📊 Effective ratio: {wantedAmount}:{offeredAmount} (they give {wantedAmount}, we give {offeredAmount})");
             
             // Fill the input fields
-            if (CurrencyExchangeSettings.FillOfferedAmount.Value)
+            if (true)
             {
                 await FillOfferedAmountField(offeredAmount);
             }
             
-            if (CurrencyExchangeSettings.FillWantedAmount.Value)
+            if (true)
             {
                 await FillWantedAmountField(wantedAmount);
             }
@@ -363,7 +363,7 @@ public partial class TradeUtils
             var makerOrders = new List<(float want, float have, float ratio)>();
             
             // Debug: Log tooltip structure
-            if (CurrencyExchangeSettings.DebugMode.Value)
+            if (Settings.LiveSearch.General.DebugMode.Value)
             {
                 LogMessage($"📋 Tooltip has {tooltip.Children?.Count ?? 0} children");
                 int childIndex = 0;
@@ -473,7 +473,7 @@ public partial class TradeUtils
                         float ratioValue = have / want;
                         makerOrders.Add((want, have, ratioValue));
                         
-                        if (CurrencyExchangeSettings.DebugMode.Value)
+                        if (Settings.LiveSearch.General.DebugMode.Value)
                         {
                             LogMessage($"🔍 Found maker order: {want:F2}:{have:F2} (ratio: {ratioValue:F4})");
                         }
@@ -483,7 +483,7 @@ public partial class TradeUtils
             catch (Exception ex)
             {
                 // Log parsing errors in debug mode
-                if (CurrencyExchangeSettings.DebugMode.Value)
+                if (Settings.LiveSearch.General.DebugMode.Value)
                 {
                     LogMessage($"⚠️ Error parsing element text at depth {depth}: {ex.Message}");
                 }
@@ -508,7 +508,7 @@ public partial class TradeUtils
         catch (Exception ex)
         {
             // Ignore errors during scanning
-            if (CurrencyExchangeSettings.DebugMode.Value)
+            if (Settings.LiveSearch.General.DebugMode.Value)
             {
                 LogMessage($"⚠️ Error scanning element at depth {depth}: {ex.Message}");
             }
@@ -544,7 +544,7 @@ public partial class TradeUtils
             // Remove "Market Ratio" text if present
             text = text.Replace("Market Ratio", "").Trim();
             
-            if (CurrencyExchangeSettings.DebugMode.Value)
+            if (Settings.LiveSearch.General.DebugMode.Value)
             {
                 LogMessage($"📝 After cleanup: '{text}' (from '{originalText}')");
             }
@@ -558,7 +558,7 @@ public partial class TradeUtils
                 {
                     if (want > 0 && have > 0)
                     {
-                        if (CurrencyExchangeSettings.DebugMode.Value)
+                        if (Settings.LiveSearch.General.DebugMode.Value)
                         {
                             LogMessage($"🔍 Parsed ratio from text: {want:F2}:{have:F2} (from {want}:{have})");
                         }
@@ -568,7 +568,7 @@ public partial class TradeUtils
             }
             
             // Only log if it looks like it might have been a ratio
-            if (text.Contains(":") && CurrencyExchangeSettings.DebugMode.Value)
+            if (text.Contains(":") && Settings.LiveSearch.General.DebugMode.Value)
             {
                 LogMessage($"⚠️ Could not parse ratio from: '{text}'");
             }
@@ -577,7 +577,7 @@ public partial class TradeUtils
         }
         catch (Exception ex)
         {
-            if (CurrencyExchangeSettings.DebugMode.Value)
+            if (Settings.LiveSearch.General.DebugMode.Value)
             {
                 LogError($"❌ Error parsing ratio: {ex.Message}");
             }
@@ -658,7 +658,7 @@ public partial class TradeUtils
             
             // Move mouse to input field
             System.Windows.Forms.Cursor.Position = new System.Drawing.Point((int)clickPos.X, (int)clickPos.Y);
-            await Task.Delay(CurrencyExchangeSettings.ActionDelay.Value + new Random().Next(0, CurrencyExchangeSettings.RandomDelay.Value));
+            await Task.Delay(ActionDelayWithJitterMs);
             
             // Click to focus input
             mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, UIntPtr.Zero);
@@ -675,7 +675,7 @@ public partial class TradeUtils
             
             // Type the new amount
             System.Windows.Forms.SendKeys.SendWait(amount.ToString());
-            await Task.Delay(CurrencyExchangeSettings.ActionDelay.Value);
+            await Task.Delay(Settings.ActionDelay.Value);
             
             LogMessage($"✅ Filled offered amount: {amount}");
         }
@@ -706,7 +706,7 @@ public partial class TradeUtils
             
             // Move mouse to input field
             System.Windows.Forms.Cursor.Position = new System.Drawing.Point((int)clickPos.X, (int)clickPos.Y);
-            await Task.Delay(CurrencyExchangeSettings.ActionDelay.Value + new Random().Next(0, CurrencyExchangeSettings.RandomDelay.Value));
+            await Task.Delay(ActionDelayWithJitterMs);
             
             // Click to focus input
             mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, UIntPtr.Zero);
@@ -740,7 +740,7 @@ public partial class TradeUtils
             
             // Type the new amount
             System.Windows.Forms.SendKeys.SendWait(amount.ToString());
-            await Task.Delay(CurrencyExchangeSettings.ActionDelay.Value);
+            await Task.Delay(Settings.ActionDelay.Value);
             
             LogMessage($"✅ Filled wanted amount: {amount}");
         }
@@ -776,7 +776,7 @@ public partial class TradeUtils
             
             // Move mouse to button
             System.Windows.Forms.Cursor.Position = new System.Drawing.Point((int)clickPos.X, (int)clickPos.Y);
-            await Task.Delay(CurrencyExchangeSettings.ActionDelay.Value + new Random().Next(0, CurrencyExchangeSettings.RandomDelay.Value));
+            await Task.Delay(ActionDelayWithJitterMs);
             
             LogMessage("✅ Moved mouse to Place Order button (ready to click)");
             LogMessage("💡 Click manually to confirm the order");
