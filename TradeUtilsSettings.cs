@@ -668,6 +668,18 @@ public class LowerPriceSubSettings
     [IgnoreMenu]
     public ToggleNode PickupItemsAtOne { get; set; } = new ToggleNode(false);
 
+    [Menu("Step Down Currency", "Once a price gets low, every further cut is enormous — 3 Divine to 2 is 33%, 2 to 1 is 50%, and 1 can't be lowered at all. With this on, a listing at or below the threshold is relisted in the next cheaper currency at the poe.ninja equivalent (Mirror to Divine to Chaos), so it keeps stepping down in fine increments instead. Needs poe.ninja rates.")]
+    [IgnoreMenu]
+    public ToggleNode StepDownCurrency { get; set; } = new ToggleNode(false);
+
+    [Menu("Step Down At or Below", "Step to the cheaper currency once the price is this low. At 3, a listing at 3, 2 or 1 Divine converts to Chaos rather than taking a 33-50% cut.")]
+    [IgnoreMenu]
+    public RangeNode<int> StepDownAtOrBelow { get; set; } = new RangeNode<int>(3, 1, 50);
+
+    [Menu("Step Down Max Amount", "Skip the step down if the converted amount would come out larger than this.")]
+    [IgnoreMenu]
+    public RangeNode<int> StepDownMaxAmount { get; set; } = new RangeNode<int>(10000, 10, 999999);
+
     [Menu("Reprice Hotkey", "Hotkey to trigger repricing manually")]
     [IgnoreMenu]
     public HotkeyNode ManualRepriceHotkey { get; set; } = new HotkeyNode(Keys.None);
@@ -781,6 +793,9 @@ public class LpSpecialActionsSubMenu
     private readonly LowerPriceSubSettings _p;
     public LpSpecialActionsSubMenu(LowerPriceSubSettings p) { _p = p; }
     [Menu("Pickup Items at 1 Currency")] public ToggleNode PickupItemsAtOne => _p.PickupItemsAtOne;
+    [Menu("Step Down Currency")] public ToggleNode StepDownCurrency => _p.StepDownCurrency;
+    [Menu("Step Down At or Below")] public RangeNode<int> StepDownAtOrBelow => _p.StepDownAtOrBelow;
+    [Menu("Step Down Max Amount")] public RangeNode<int> StepDownMaxAmount => _p.StepDownMaxAmount;
     [Menu("Reprice Hotkey")] public HotkeyNode ManualRepriceHotkey => _p.ManualRepriceHotkey;
 }
 
