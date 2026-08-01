@@ -58,6 +58,7 @@ public partial class TradeUtils : BaseSettingsPlugin<TradeUtilsSettings>
         {
             LogMessage("Initializing LowerPrice...");
             InitializeLowerPrice();
+            InitializeStashValue();
         }
         else
         {
@@ -173,9 +174,11 @@ public partial class TradeUtils : BaseSettingsPlugin<TradeUtilsSettings>
     // Placeholder methods - will be implemented in partial classes
     partial void InitializeLiveSearch();
     partial void InitializeLowerPrice();
+    partial void InitializeStashValue();
     partial void InitializeBulkBuy();
     partial void InitializeCurrencyExchange();
     partial void RenderLowerPrice();
+    partial void RenderStashValue();
     partial void RenderBulkBuy();
     partial void RenderCurrencyExchange();
     partial void AreaChangeLiveSearch(AreaInstance area);

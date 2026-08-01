@@ -2,12 +2,14 @@ using System;
 using System.Collections.Generic;
 using System.Collections.Concurrent;
 using System.Drawing;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Numerics;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 using ExileCore;
+using ExileCore.PoEMemory;
 using ExileCore.PoEMemory.Components;
 using ExileCore.PoEMemory.Elements;
 using ExileCore.PoEMemory.Elements.InventoryElements;
@@ -25,6 +27,23 @@ namespace TradeUtils;
 
 public partial class TradeUtils
 {
+    /// <summary>Display name the client uses for chaos, on tooltips and in the currency dropdown.</summary>
+    private const string ChaosOrbName = "Chaos Orb";
+
+    // Fixed values that used to be settings. They were knobs nobody needs to turn, and the menu had
+    // grown to the point where the handful that do matter were hard to find.
+    private const int LowerPriceTimerMinutes = 60;
+    private const int LowerPriceRateRefreshMinutes = 30; // poe.ninja caches ~5 min, so stay well above it
+    private const int LowerPriceValueDisplayX = 10;
+    private const int LowerPriceValueDisplayY = 100;
+    private const int LowerPriceStashValueDisplayX = 300;
+    private const int LowerPriceStashValueDisplayY = 100;
+    private const int LowerPriceStepDownMaxAmount = 10000;
+
+    /// <summary>Humanised pause between UI actions, drawn fresh each time it's read.</summary>
+    private int LowerPriceStepDelayMs =>
+        ActionDelayWithJitterMs;
+
     // LowerPrice-specific fields
     private readonly ConcurrentDictionary<RectangleF, bool?> _lowerPriceMouseStateForRect = new();
     private readonly Random _lowerPriceRandom = new Random();
@@ -42,8 +61,27 @@ public partial class TradeUtils
     // Value display fields
     private readonly HttpClient _lowerPriceHttpClient = new HttpClient();
     private DateTime _lowerPriceLastCurrencyUpdate = DateTime.MinValue;
-    private Dictionary<string, decimal> _lowerPriceCurrencyRates = new Dictionary<string, decimal>();
+
+    // Chaos value of ONE unit of each currency, keyed by the in-game display name
+    // ("Divine Orb" -> 177.9). Everything is summed in chaos and converted once at the end,
+    // which is what the old pairwise "x_to_y" rate table was trying to do — it never worked,
+    // because the poe.ninja parser only ever wrote "<name>_to_chaos" keys while the display
+    // read "chaos_to_divine"-style keys that nothing populated, so every lookup returned 0.
+    private Dictionary<string, decimal> _lowerPriceChaosValues =
+        new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
     private readonly object _lowerPriceCurrencyRatesLock = new object();
+    private int _lowerPriceRatesFetching; // 0 = idle, 1 = a poe.ninja fetch is in flight
+
+    // Which league the table in _lowerPriceChaosValues was actually fetched for. Without this the
+    // rates get pinned to whatever league resolved on the very first fetch — which is the fallback,
+    // since ServerData.League reads empty and the API lookup hasn't returned yet at startup — and
+    // the interval guard then holds those wrong numbers for a full refresh period.
+    private string _lowerPriceRatesLeague;
+
+    // Backoff after a failed fetch, so a league poe.ninja doesn't know can't turn the render loop
+    // into a request flood.
+    private DateTime _lowerPriceRatesNextAttempt = DateTime.MinValue;
+    private bool _lowerPriceValueScanErrorLogged;
 
     private bool LowerPriceMoveCancellationRequested => (Control.MouseButtons & MouseButtons.Right) != 0;
 
@@ -114,7 +152,7 @@ public partial class TradeUtils
             CheckLowerPriceHotkeys();
 
             // Render timer display
-            if (LowerPriceSettings.EnableTimer.Value && LowerPriceSettings.ShowTimerCountdown.Value)
+            if (LowerPriceSettings.EnableTimer.Value)
             {
                 RenderLowerPriceTimerDisplay();
             }
@@ -346,6 +384,8 @@ public partial class TradeUtils
             int skippedNoPrice = 0;
             int repriced = 0;
             int pickedUp = 0;
+            int steppedDown = 0;
+            bool stepDownVerificationFailed = false;
             bool structureDumped = false;  // Only dump structure once for first item
             
             foreach (var item in items)
@@ -364,7 +404,7 @@ public partial class TradeUtils
                     {
                         LogMessage($"LowerPrice DEBUG: Item {processedCount} - Skipping (has 2 children)");
                         await TaskUtils.NextFrame();
-                        await Task.Delay(LowerPriceSettings.ActionDelay.Value + _lowerPriceRandom.Next(LowerPriceSettings.RandomDelay.Value));
+                        await Task.Delay(LowerPriceStepDelayMs);
                         continue;
                     }
 
@@ -377,7 +417,7 @@ public partial class TradeUtils
                     LogMessage($"LowerPrice DEBUG: Item {processedCount} - Moving mouse to position ({position.X}, {position.Y})");
                     Utility.Mouse.moveMouse(position);
                     await TaskUtils.NextFrame();
-                    await Task.Delay(LowerPriceSettings.ActionDelay.Value + _lowerPriceRandom.Next(LowerPriceSettings.RandomDelay.Value));
+                    await Task.Delay(LowerPriceStepDelayMs);
 
                     // Check if item is locked before processing
                     if (IsLowerPriceItemLocked(item))
@@ -385,7 +425,7 @@ public partial class TradeUtils
                         LogMessage($"LowerPrice DEBUG: Item {processedCount} - Skipping (locked)");
                         skippedLocked++;
                         await TaskUtils.NextFrame();
-                        await Task.Delay(LowerPriceSettings.ActionDelay.Value + _lowerPriceRandom.Next(LowerPriceSettings.RandomDelay.Value));
+                        await Task.Delay(LowerPriceStepDelayMs);
                         continue;
                     }
 
@@ -434,11 +474,15 @@ public partial class TradeUtils
                                                 {
                                                     string orbType = priceChild1.Children.Count > 2 ? priceChild1.Children[2].Text : null;
                                                     LogMessage($"LowerPrice DEBUG: Item {processedCount} - OldPrice = {oldPrice}, OrbType = '{orbType}'");
-                                                    bool reprice = false;
-                                                    if (orbType == "Chaos Orb" && LowerPriceSettings.RepriceChaos.Value) reprice = true;
-                                                    else if (orbType == "Divine Orb" && LowerPriceSettings.RepriceDivine.Value) reprice = true;
-                                                    else if (orbType == "Exalted Orb" && LowerPriceSettings.RepriceExalted.Value) reprice = true;
-                                                    else if (orbType == "Orb of Annulment" && LowerPriceSettings.RepriceAnnul.Value) reprice = true;
+                                                    // Everything priced in a currency we can read is repriced, except that
+                                                    // Divine and Mirror listings each keep an opt-out — those are the ones
+                                                    // where an automated mistake is worth the most.
+                                                    bool reprice = orbType switch
+                                                    {
+                                                        "Divine Orb" => LowerPriceSettings.RepriceDivine.Value,
+                                                        "Mirror of Kalandra" => LowerPriceSettings.RepriceMirror.Value,
+                                                        _ => !string.IsNullOrWhiteSpace(orbType),
+                                                    };
 
                                                     LogMessage($"LowerPrice DEBUG: Item {processedCount} - Reprice = {reprice}");
                                                     if (!reprice)
@@ -449,7 +493,52 @@ public partial class TradeUtils
 
                                                     float newPrice = CalculateLowerPriceNewPrice(oldPrice, orbType);
                                                     LogMessage($"LowerPrice DEBUG: Item {processedCount} - Calculated newPrice = {newPrice}");
-                                                    
+
+                                                    // Down here every further cut in the item's own currency is enormous, and at 1
+                                                    // there is no cut left to make. Move the listing onto a cheaper currency so it
+                                                    // can keep sliding in small steps instead.
+                                                    if (LowerPriceSettings.StepDownCurrency.Value &&
+                                                        oldPrice <= LowerPriceSettings.StepDownAtOrBelow.Value)
+                                                    {
+                                                        var stepPrice = CalculateLowerPriceStepDown(oldPrice, orbType, out var targetOrb, out var stepBlockedBy);
+                                                        if (stepPrice > 0)
+                                                        {
+                                                            LogMessage($"LowerPrice DEBUG: Item {processedCount} - Stepping down {oldPrice}x {orbType} to {stepPrice}x {targetOrb}");
+                                                            if (await TryLowerPriceStepDownListing(stepPrice, targetOrb, position))
+                                                            {
+                                                                // The currency dropdown can't be read back, so the listing is only
+                                                                // trustworthy once the item's own tooltip agrees. If it doesn't, the
+                                                                // row order has moved and every later item would be mispriced the
+                                                                // same way — stop rather than work through the tab.
+                                                                if (!await VerifyLowerPriceStepDown(item, position, stepPrice, targetOrb))
+                                                                {
+                                                                    stepDownVerificationFailed = true;
+                                                                    break;
+                                                                }
+
+                                                                steppedDown++;
+                                                                LogMessage($"LowerPrice DEBUG: Item {processedCount} - Relisted as {stepPrice}x {targetOrb}");
+
+                                                                if (LowerPriceSettings.EnableTimer.Value)
+                                                                {
+                                                                    _lowerPriceLastRepriceTime = DateTime.Now;
+                                                                    _lowerPriceTimerExpired = false;
+                                                                }
+
+                                                                await TaskUtils.NextFrame();
+                                                                await Task.Delay(LowerPriceStepDelayMs);
+                                                                continue;
+                                                            }
+
+                                                            // The listing is untouched, so the normal path below is still safe to run.
+                                                            LogError($"LowerPrice: step down to {targetOrb} didn't go through for item {processedCount}; leaving it priced in {orbType}.");
+                                                        }
+                                                        else
+                                                        {
+                                                            LogMessage($"LowerPrice DEBUG: Item {processedCount} - Not stepping down: {stepBlockedBy}");
+                                                        }
+                                                    }
+
                                                     if (oldPrice == 1)
                                                     {
                                                         LogMessage($"LowerPrice DEBUG: Item {processedCount} - Price is 1, PickupItemsAtOne = {LowerPriceSettings.PickupItemsAtOne.Value}");
@@ -458,16 +547,16 @@ public partial class TradeUtils
                                                             LogMessage($"LowerPrice DEBUG: Item {processedCount} - Picking up item");
                                                             Utility.Keyboard.KeyDown(Keys.LControlKey);
                                                             await TaskUtils.NextFrame();
-                                                            await Task.Delay(LowerPriceSettings.ActionDelay.Value + _lowerPriceRandom.Next(LowerPriceSettings.RandomDelay.Value));
+                                                            await Task.Delay(LowerPriceStepDelayMs);
                                                             Utility.Mouse.LeftDown();
                                                             await TaskUtils.NextFrame();
-                                                            await Task.Delay(LowerPriceSettings.ActionDelay.Value + _lowerPriceRandom.Next(LowerPriceSettings.RandomDelay.Value));
+                                                            await Task.Delay(LowerPriceStepDelayMs);
                                                             Utility.Mouse.LeftUp();
                                                             await TaskUtils.NextFrame();
-                                                            await Task.Delay(LowerPriceSettings.ActionDelay.Value + _lowerPriceRandom.Next(LowerPriceSettings.RandomDelay.Value));
+                                                            await Task.Delay(LowerPriceStepDelayMs);
                                                             Utility.Keyboard.KeyUp(Keys.LControlKey);
                                                             await TaskUtils.NextFrame();
-                                                            await Task.Delay(LowerPriceSettings.ActionDelay.Value + _lowerPriceRandom.Next(LowerPriceSettings.RandomDelay.Value));
+                                                            await Task.Delay(LowerPriceStepDelayMs);
                                                             pickedUp++;
                                                         }
                                                         continue;
@@ -477,16 +566,16 @@ public partial class TradeUtils
                                                     LogMessage($"LowerPrice DEBUG: Item {processedCount} - Repricing from {oldPrice} to {newPrice}");
                                                     Utility.Mouse.RightDown();
                                                     await TaskUtils.NextFrame();
-                                                    await Task.Delay(LowerPriceSettings.ActionDelay.Value + _lowerPriceRandom.Next(LowerPriceSettings.RandomDelay.Value));
+                                                    await Task.Delay(LowerPriceStepDelayMs);
                                                     Utility.Mouse.RightUp();
                                                     await TaskUtils.NextFrame();
-                                                    await Task.Delay(LowerPriceSettings.ActionDelay.Value + _lowerPriceRandom.Next(LowerPriceSettings.RandomDelay.Value));
+                                                    await Task.Delay(LowerPriceStepDelayMs);
                                                     Utility.Keyboard.Type($"{newPrice}");
                                                     await TaskUtils.NextFrame();
-                                                    await Task.Delay(LowerPriceSettings.ActionDelay.Value + _lowerPriceRandom.Next(LowerPriceSettings.RandomDelay.Value));
+                                                    await Task.Delay(LowerPriceStepDelayMs);
                                                     Utility.Keyboard.KeyPress(Keys.Enter);
                                                     await TaskUtils.NextFrame();
-                                                    await Task.Delay(LowerPriceSettings.ActionDelay.Value + _lowerPriceRandom.Next(LowerPriceSettings.RandomDelay.Value));
+                                                    await Task.Delay(LowerPriceStepDelayMs);
                                                     repriced++;
                                                     LogMessage($"LowerPrice DEBUG: Item {processedCount} - Successfully repriced!");
                                                     
@@ -546,7 +635,7 @@ public partial class TradeUtils
                     }
 
                     await TaskUtils.NextFrame();
-                    await Task.Delay(LowerPriceSettings.ActionDelay.Value + _lowerPriceRandom.Next(LowerPriceSettings.RandomDelay.Value));
+                    await Task.Delay(LowerPriceStepDelayMs);
                 }
                 catch (Exception ex)
                 {
@@ -562,7 +651,12 @@ public partial class TradeUtils
             LogMessage($"LowerPrice DEBUG: Items locked: {skippedLocked}");
             LogMessage($"LowerPrice DEBUG: Items without price: {skippedNoPrice}");
             LogMessage($"LowerPrice DEBUG: Items repriced: {repriced}");
+            LogMessage($"LowerPrice DEBUG: Items stepped down a currency: {steppedDown}");
             LogMessage($"LowerPrice DEBUG: Items picked up: {pickedUp}");
+
+            if (stepDownVerificationFailed)
+                LogError("=== LowerPrice: run STOPPED early because a step down couldn't be verified. " +
+                         "The last item touched may be listed in the wrong currency — check it before running again. ===");
         }
         catch (Exception ex)
         {
@@ -571,42 +665,599 @@ public partial class TradeUtils
         }
     }
 
+    /// <summary>
+    /// The reduced price for a listing, by whichever strategy is configured.
+    ///
+    /// There used to be five per-currency "Override" toggles here, all of which forced flat
+    /// reduction despite three of them being named *UseRatio — so with the shipped defaults a
+    /// Chaos listing dropped by 1 flat while the Price Ratio slider sat there looking like it was
+    /// in charge. One strategy for every currency is both simpler and honest about what it does.
+    /// </summary>
     private float CalculateLowerPriceNewPrice(int oldPrice, string orbType)
     {
-        bool useFlatReduction = false;
+        return LowerPriceSettings.UseFlatReduction.Value
+            ? oldPrice - LowerPriceSettings.FlatReductionAmount.Value
+            : (float)Math.Floor(oldPrice * LowerPriceSettings.PriceRatio.Value);
+    }
 
-        // Check for currency-specific overrides first
-        switch (orbType)
+    /// <summary>
+    /// The price tiers a listing walks down. Only the rungs people actually price in — stepping a
+    /// Divine listing onto Exalts or Annuls would technically work but nobody shops that way.
+    /// The order is taken from the live poe.ninja values rather than from this array, so the ladder
+    /// follows the market if the tiers ever reorder.
+    /// </summary>
+    private static readonly string[] LowerPriceCurrencyLadder =
+    {
+        "Mirror of Kalandra",
+        "Divine Orb",
+        ChaosOrbName,
+    };
+
+    /// <summary>
+    /// The next rung below <paramref name="orbType"/> — the most valuable ladder currency that is
+    /// still strictly cheaper than what the item is priced in now. Null when nothing is cheaper,
+    /// which is the case for Chaos itself and for anything already below it.
+    /// </summary>
+    private string GetNextCheaperLowerPriceCurrency(string orbType)
+    {
+        var currentValue = GetLowerPriceChaosValue(orbType);
+        if (currentValue <= 0) return null;
+
+        // A currency off the ladder entirely (Exalted, Annul, ...) lands on the first rung below
+        // its own value, which is Chaos for anything cheap. That is the sensible destination.
+        return LowerPriceCurrencyLadder
+            .Select(name => new { Name = name, Value = GetLowerPriceChaosValue(name) })
+            .Where(c => c.Value > 0 && c.Value < currentValue)
+            .OrderByDescending(c => c.Value)
+            .Select(c => c.Name)
+            .FirstOrDefault();
+    }
+
+    /// <summary>
+    /// Works out the replacement listing when <paramref name="oldPrice"/>x <paramref name="orbType"/>
+    /// is too low to keep cutting in its own currency: the equivalent amount of the next cheaper
+    /// currency, with that currency's normal reduction already applied. 1 Divine at 200c comes out
+    /// as 180 Chaos under a 0.9 ratio. Returns 0 when the step shouldn't happen, with
+    /// <paramref name="reason"/> saying why.
+    /// </summary>
+    private int CalculateLowerPriceStepDown(int oldPrice, string orbType, out string targetOrb, out string reason)
+    {
+        targetOrb = null;
+        reason = null;
+
+        if (string.IsNullOrWhiteSpace(orbType))
         {
-            case "Divine Orb":
-                // Divine Override: if checked, force flat reduction; if unchecked, use global setting
-                useFlatReduction = LowerPriceSettings.DivineUseFlat ? true : LowerPriceSettings.UseFlatReduction;
-                break;
-            case "Chaos Orb":
-                // Chaos Override: if checked, force flat reduction; if unchecked, use global setting
-                useFlatReduction = LowerPriceSettings.ChaosUseRatio ? true : LowerPriceSettings.UseFlatReduction;
-                break;
-            case "Exalted Orb":
-                // Exalted Override: if checked, force flat reduction; if unchecked, use global setting
-                useFlatReduction = LowerPriceSettings.ExaltedUseRatio ? true : LowerPriceSettings.UseFlatReduction;
-                break;
-            case "Orb of Annulment":
-                // Annul Override: if checked, force flat reduction; if unchecked, use global setting
-                useFlatReduction = LowerPriceSettings.AnnulUseFlat ? true : LowerPriceSettings.UseFlatReduction;
-                break;
-            default:
-                // Use global setting for unknown currencies
-                useFlatReduction = LowerPriceSettings.UseFlatReduction;
-                break;
+            reason = "the listing currency couldn't be read";
+            return 0;
         }
 
-        if (useFlatReduction)
+        orbType = orbType.Trim();
+
+        // Rates drive the whole conversion, so a table that never loaded — or one left over from
+        // hours ago — would misprice a real listing. Refuse rather than guess.
+        if (!IsLowerPriceRateTableFresh(out var staleReason))
         {
-            return oldPrice - LowerPriceSettings.FlatReductionAmount.Value;
+            reason = staleReason;
+            return 0;
         }
-        else
+
+        var sourceChaos = GetLowerPriceChaosValue(orbType);
+        if (sourceChaos <= 0)
         {
-            return (float)Math.Floor(oldPrice * LowerPriceSettings.PriceRatio.Value);
+            reason = $"there is no poe.ninja chaos rate for '{orbType}'";
+            return 0;
+        }
+
+        targetOrb = GetNextCheaperLowerPriceCurrency(orbType);
+        if (targetOrb == null)
+        {
+            reason = $"'{orbType}' is already the cheapest rung on the ladder";
+            return 0;
+        }
+
+        var targetChaos = GetLowerPriceChaosValue(targetOrb);
+        if (targetChaos <= 0)
+        {
+            reason = $"there is no poe.ninja chaos rate for '{targetOrb}'";
+            return 0;
+        }
+
+        var equivalent = oldPrice * sourceChaos / targetChaos;
+
+        // Reduce by whatever rule the target currency uses, so a stepped-down listing and one that
+        // was always priced in that currency move by the same amount from here on.
+        var reduced = LowerPriceSettings.UseFlatReduction.Value
+            ? equivalent - LowerPriceSettings.FlatReductionAmount.Value
+            : Math.Floor(equivalent * (decimal)LowerPriceSettings.PriceRatio.Value);
+
+        var newPrice = (int)Math.Floor(reduced);
+        if (newPrice < 1) newPrice = 1;
+
+        // The clamp above can round a very cheap listing back up, and the point of a reprice is to
+        // go down. Anything that doesn't is a no-op at best.
+        if (newPrice * targetChaos >= oldPrice * sourceChaos)
+        {
+            reason = $"{newPrice}x {targetOrb} is not cheaper than {oldPrice}x {orbType}";
+            return 0;
+        }
+
+        var cap = LowerPriceStepDownMaxAmount;
+        if (newPrice > cap)
+        {
+            reason = $"the converted amount ({newPrice}x {targetOrb}) is above the {cap} cap";
+            return 0;
+        }
+
+        return newPrice;
+    }
+
+    /// <summary>
+    /// Whether the poe.ninja table is recent enough to price a real listing against. The value
+    /// display can live with stale numbers; a conversion that relists an item cannot.
+    /// </summary>
+    private bool IsLowerPriceRateTableFresh(out string reason)
+    {
+        reason = null;
+
+        if (_lowerPriceLastCurrencyUpdate == DateTime.MinValue)
+        {
+            reason = "poe.ninja rates have not loaded yet";
+            return false;
+        }
+
+        // The table has to belong to the league the items are actually listed in. Standard prices a
+        // Divine near 829 chaos against roughly 174 in the current challenge league, so pricing off
+        // the wrong one relists items at about five times the intended number.
+        var league = ResolveLeagueOrNull();
+        if (league == null)
+        {
+            reason = "the current league hasn't been resolved yet";
+            return false;
+        }
+
+        if (!string.Equals(league, _lowerPriceRatesLeague, StringComparison.OrdinalIgnoreCase))
+        {
+            reason = $"the loaded rates are for '{_lowerPriceRatesLeague ?? "?"}' but the league is '{league}'";
+            return false;
+        }
+
+        // Two intervals of slack: one missed refresh is normal, a run of them means the fetch is
+        // failing and the numbers are drifting away from the market.
+        var maxAge = TimeSpan.FromMinutes(LowerPriceRateRefreshMinutes * 2);
+        var age = DateTime.Now - _lowerPriceLastCurrencyUpdate;
+        if (age > maxAge)
+        {
+            reason = $"poe.ninja rates are {age.TotalMinutes:F0} minutes stale";
+            return false;
+        }
+
+        return true;
+    }
+
+    // ===== Stepping a listing onto a cheaper currency =====
+    //
+    // The in-currency reprice gets away with "right-click, type, Enter" because it only touches the
+    // amount. Changing the currency means driving the Set Item Price dialog, and that dialog is
+    // rough to automate: the offline merchant uses the generic PopUpWindow rather than ExileCore's
+    // typed ItemRightClickPriceMenu, and the currency list is drawn by the client with no backing
+    // elements at all. A scan of every element under UIRoot with the list open found no row for any
+    // currency name, and the dropdown's own label is just as unreadable.
+    //
+    // So a row is picked by clicking its slot on a grid derived from the list's scrollbar, which IS
+    // a real element, and the only proof the right currency landed is the item's tooltip afterwards.
+
+    // Children of PopUpWindow[2][0] - the control row along the bottom of the dialog.
+    private const int LowerPriceAmountControlIndex = 0;
+    private const int LowerPriceCurrencyControlIndex = 1;
+    private const int LowerPriceListButtonControlIndex = 2;
+
+    // Child of the currency dropdown: the option list's scrollbar, visible only while it is open.
+    private const int LowerPriceCurrencyScrollbarIndex = 2;
+
+    // How many rows the list shows at once. This is a UI constant, unlike the row height in pixels,
+    // so deriving the height from the scrollbar track keeps the grid right at any resolution.
+    private const int LowerPriceCurrencyVisibleRows = 14;
+
+    /// <summary>
+    /// Where each ladder currency sits in the dropdown. Clicking a slot is the only way to choose
+    /// one, so this order is load-bearing - it was read off the live client on 2026-07-31. Every
+    /// conversion re-reads the item tooltip afterwards and stops the run if the order has moved,
+    /// which is what keeps a reordered list from quietly mispricing a whole tab.
+    /// </summary>
+    private static readonly Dictionary<string, int> LowerPriceCurrencyRowIndex =
+        new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase)
+        {
+            [ChaosOrbName] = 0,
+            ["Divine Orb"] = 1,
+            ["Mirror of Kalandra"] = 5,
+        };
+
+    /// <summary>
+    /// Relists the item under the cursor as <paramref name="amount"/>x <paramref name="targetOrb"/>.
+    /// Returns false with the listing untouched if any step doesn't land, and puts the cursor back
+    /// on the item at <paramref name="itemPosition"/> so the caller's fallback path still aims at it.
+    /// </summary>
+    private async Task<bool> TryLowerPriceStepDownListing(int amount, string targetOrb, Vector2 itemPosition)
+    {
+        if (!LowerPriceCurrencyRowIndex.TryGetValue(targetOrb, out var rowIndex))
+        {
+            LogError($"LowerPrice: no known dropdown row for '{targetOrb}', so it can't be selected.");
+            return false;
+        }
+
+        // Same gesture the in-currency path uses to start an edit.
+        Utility.Mouse.RightDown();
+        await LowerPriceActionStep();
+        Utility.Mouse.RightUp();
+        await LowerPriceActionStep();
+
+        var dialog = await WaitForLowerPriceDialog(2000);
+        if (dialog == null)
+        {
+            // Distinguish "nothing opened" from "something else opened", because the second one
+            // means the title check saved us from driving an unrelated popup.
+            var popUp = GameController?.IngameState?.IngameUi?.PopUpWindow;
+            var title = ReadLowerPriceDialogTitle(popUp);
+            LogError(popUp?.IsVisible == true && !string.IsNullOrWhiteSpace(title)
+                ? $"LowerPrice: right-click opened '{title}', not the {LowerPriceDialogTitle} dialog; leaving it alone."
+                : $"LowerPrice: right-clicking the item didn't open the {LowerPriceDialogTitle} dialog.");
+            return false;
+        }
+
+        var committed = false;
+        try
+        {
+            committed = await TrySelectLowerPriceCurrencyRow(dialog, rowIndex, targetOrb)
+                     && await TrySetLowerPriceAmount(dialog, amount)
+                     && await TryCommitLowerPriceDialog(dialog);
+        }
+        catch (Exception ex)
+        {
+            LogError($"LowerPrice: step down to {targetOrb} threw mid-edit ({ex.GetType().Name}: {ex.Message}).");
+        }
+
+        if (!committed)
+        {
+            await CancelLowerPriceDialog();
+
+            // Picking a currency leaves the cursor down on the dropdown, and the caller's fallback
+            // right-clicks wherever the cursor happens to be. Put it back on the item first.
+            Utility.Mouse.moveMouse(itemPosition);
+            await LowerPriceActionStep();
+        }
+
+        return committed;
+    }
+
+    private const string LowerPriceDialogTitle = "Set Item Price";
+
+    /// <summary>
+    /// The Set Item Price dialog, or null when it isn't open. PopUpWindow is a shared slot — the
+    /// same address also backs DestroyConfirmationWindow and others — so the title is checked
+    /// before anything gets clicked at fixed child indices. Clicking blind into the wrong popup is
+    /// exactly the kind of mistake that isn't recoverable.
+    /// </summary>
+    private Element GetLowerPriceDialog()
+    {
+        var popUp = GameController?.IngameState?.IngameUi?.PopUpWindow;
+        if (popUp?.IsVisible != true) return null;
+
+        return string.Equals(ReadLowerPriceDialogTitle(popUp), LowerPriceDialogTitle, StringComparison.OrdinalIgnoreCase)
+            ? popUp
+            : null;
+    }
+
+    private static string ReadLowerPriceDialogTitle(Element popUp)
+    {
+        try
+        {
+            var title = popUp?.Children?.ElementAtOrDefault(0)?.Children?.ElementAtOrDefault(0);
+            return (title?.TextNoTags ?? title?.Text)?.Trim();
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private async Task<Element> WaitForLowerPriceDialog(int timeoutMs)
+    {
+        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+        while (true)
+        {
+            var dialog = GetLowerPriceDialog();
+            if (dialog != null) return dialog;
+            if (stopwatch.ElapsedMilliseconds >= timeoutMs) return null;
+            await Task.Delay(25);
+        }
+    }
+
+    /// <summary>One of the three controls along the bottom of the dialog: amount, currency, commit.</summary>
+    private static Element GetLowerPriceDialogControl(Element dialog, int controlIndex)
+    {
+        try
+        {
+            var controlRow = dialog?.Children?.ElementAtOrDefault(2)?.Children?.ElementAtOrDefault(0);
+            return controlRow?.Children?.ElementAtOrDefault(controlIndex);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static bool IsLowerPriceCurrencyListOpen(Element dropdown)
+    {
+        try
+        {
+            var scrollbar = dropdown?.Children?.ElementAtOrDefault(LowerPriceCurrencyScrollbarIndex);
+            return scrollbar?.IsVisibleLocal == true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private async Task<bool> TrySelectLowerPriceCurrencyRow(Element dialog, int rowIndex, string targetOrb)
+    {
+        var dropdown = GetLowerPriceDialogControl(dialog, LowerPriceCurrencyControlIndex);
+        if (dropdown == null)
+        {
+            LogError("LowerPrice: the price dialog has no currency dropdown where one was expected.");
+            return false;
+        }
+
+        if (!IsLowerPriceCurrencyListOpen(dropdown))
+        {
+            await LowerPriceClickElement(dropdown.GetClientRectCache);
+            if (!await WaitForLowerPriceCondition(() => IsLowerPriceCurrencyListOpen(dropdown), 1500))
+            {
+                LogError("LowerPrice: the currency list didn't open.");
+                return false;
+            }
+        }
+
+        if (!TryGetLowerPriceCurrencyRowRect(dropdown, rowIndex, out var rowRect))
+        {
+            LogError($"LowerPrice: can't place row {rowIndex} ('{targetOrb}') on the currency list grid.");
+            return false;
+        }
+
+        await LowerPriceClickElement(rowRect);
+
+        // The list closing is the only signal available here. Which row it landed on is genuinely
+        // unreadable, so the tooltip check after the commit is what actually proves the currency.
+        if (!await WaitForLowerPriceCondition(() => !IsLowerPriceCurrencyListOpen(dropdown), 1500))
+        {
+            LogError("LowerPrice: the currency list stayed open after clicking a row.");
+            return false;
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Screen rect of a row in the open currency list. The rows themselves aren't in the element
+    /// tree, but the list's scrollbar is, and the rows sit on an even grid down that track.
+    /// </summary>
+    private static bool TryGetLowerPriceCurrencyRowRect(Element dropdown, int rowIndex, out RectangleF rect)
+    {
+        rect = default;
+
+        var scrollbar = dropdown?.Children?.ElementAtOrDefault(LowerPriceCurrencyScrollbarIndex);
+        if (scrollbar == null || !scrollbar.IsVisibleLocal) return false;
+
+        var track = scrollbar.GetClientRectCache;
+        if (track.Height <= 0) return false;
+
+        // The grid only means anything from the top of the list. If something scrolled it, the row
+        // under a given slot is no longer the row this method claims it is.
+        var thumb = scrollbar.Children?.ElementAtOrDefault(2);
+        if (thumb != null && thumb.GetClientRectCache.Y > track.Y + 2f) return false;
+
+        var rowHeight = track.Height / LowerPriceCurrencyVisibleRows;
+        var top = track.Y + rowIndex * rowHeight;
+        if (top + rowHeight > track.Y + track.Height) return false; // would need scrolling
+
+        // Span the row between the dropdown's left edge and the scrollbar column, inset at both
+        // ends. Proportional rather than a fixed pixel inset, so it holds at any resolution.
+        var listLeft = dropdown.GetClientRectCache.X;
+        var listWidth = track.X - listLeft;
+        if (listWidth <= 20f) return false;
+
+        rect = new RectangleF(listLeft + listWidth * 0.15f, top, listWidth * 0.7f, rowHeight);
+        return true;
+    }
+
+    private async Task<bool> TrySetLowerPriceAmount(Element dialog, int amount)
+    {
+        var input = GetLowerPriceDialogControl(dialog, LowerPriceAmountControlIndex);
+        if (input == null)
+        {
+            LogError("LowerPrice: the price dialog has no amount field where one was expected.");
+            return false;
+        }
+
+        await LowerPriceClickElement(input.GetClientRectCache);
+
+        // Clicking in drops the caret into the existing number rather than replacing it, so select
+        // what's already there first - otherwise the new digits splice into the old price.
+        Utility.Keyboard.KeyDown(Keys.LControlKey);
+        Utility.Keyboard.KeyPress(Keys.A);
+        Utility.Keyboard.KeyUp(Keys.LControlKey);
+        await LowerPriceActionStep();
+
+        Utility.Keyboard.Type(amount.ToString(CultureInfo.InvariantCulture));
+        await LowerPriceActionStep();
+
+        // This field, unlike the dropdown, does expose its text - so a mistyped amount is catchable
+        // before anything gets committed.
+        var typed = ReadLowerPriceAmountField(input);
+        if (typed.HasValue && typed.Value != amount)
+        {
+            LogError($"LowerPrice: the amount field reads {typed.Value} after typing {amount}; not committing.");
+            return false;
+        }
+
+        return true;
+    }
+
+    private static int? ReadLowerPriceAmountField(Element input)
+    {
+        string text = null;
+        try { text = input?.TextNoTags ?? input?.Text; } catch { }
+        if (string.IsNullOrWhiteSpace(text)) return null;
+
+        var digits = new string(text.Where(char.IsDigit).ToArray());
+        return digits.Length > 0 && int.TryParse(digits, out var value) ? value : (int?)null;
+    }
+
+    private async Task<bool> TryCommitLowerPriceDialog(Element dialog)
+    {
+        var listButton = GetLowerPriceDialogControl(dialog, LowerPriceListButtonControlIndex);
+        if (listButton == null)
+        {
+            LogError("LowerPrice: the price dialog has no List Item button where one was expected.");
+            return false;
+        }
+
+        await LowerPriceClickElement(listButton.GetClientRectCache);
+
+        if (!await WaitForLowerPriceCondition(() => GetLowerPriceDialog() == null, 2000))
+        {
+            LogError("LowerPrice: the price dialog stayed open after clicking List Item.");
+            return false;
+        }
+
+        return true;
+    }
+
+    private async Task CancelLowerPriceDialog()
+    {
+        if (GetLowerPriceDialog() == null) return;
+
+        Utility.Keyboard.KeyPress(Keys.Escape);
+        await LowerPriceActionStep();
+
+        if (GetLowerPriceDialog() != null)
+            LogError("LowerPrice: couldn't close the price dialog; stop the run and check the listing by hand.");
+    }
+
+    /// <summary>
+    /// Confirms a step down actually produced the intended listing, by re-hovering the item and
+    /// reading its tooltip. This is the entire safety net for the unreadable dropdown: if the client
+    /// ever reorders the currency list, this is what catches it.
+    /// </summary>
+    private async Task<bool> VerifyLowerPriceStepDown(NormalInventoryItem item, Vector2 itemPosition,
+                                                      int expectedAmount, string expectedOrb)
+    {
+        Utility.Mouse.moveMouse(itemPosition);
+        await LowerPriceActionStep();
+
+        var price = 0;
+        string orbType = null;
+        var read = false;
+
+        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+        while (stopwatch.ElapsedMilliseconds < 2000)
+        {
+            if (TryReadLowerPriceTooltipPrice(item, out price, out orbType))
+            {
+                read = true;
+                break;
+            }
+
+            await Task.Delay(50);
+        }
+
+        if (!read)
+        {
+            LogError($"LowerPrice: couldn't re-read the item's price after relisting it as {expectedAmount}x " +
+                     $"{expectedOrb}, so the new listing is unverified. Check it by hand.");
+            return false;
+        }
+
+        if (price != expectedAmount ||
+            !string.Equals(orbType?.Trim(), expectedOrb, StringComparison.OrdinalIgnoreCase))
+        {
+            LogError($"LowerPrice: step down produced {price}x {orbType}, not {expectedAmount}x {expectedOrb}. " +
+                     "The client's currency row order no longer matches LowerPriceCurrencyRowIndex - fix that " +
+                     "before running again.");
+            return false;
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Reads "Asking Price: Nx &lt;Currency&gt;" off a merchant item's hover tooltip, the same shape
+    /// the reprice loop parses inline.
+    /// </summary>
+    private static bool TryReadLowerPriceTooltipPrice(NormalInventoryItem item, out int price, out string orbType)
+    {
+        price = 0;
+        orbType = null;
+
+        try
+        {
+            var priceRow = item?.Tooltip?.Children?.ElementAtOrDefault(0)
+                                       ?.Children?.ElementAtOrDefault(1)
+                                       ?.Children?.LastOrDefault();
+
+            var priceGroup = priceRow?.Children?.ElementAtOrDefault(1);
+            if (priceGroup?.Children == null || priceGroup.Children.Count < 3) return false;
+
+            var priceText = priceGroup.Children[0]?.Text;
+            if (priceText == null || !priceText.EndsWith("x")) return false;
+            if (!int.TryParse(priceText.Replace("x", "").Replace(",", "").Trim(), out price)) return false;
+
+            orbType = priceGroup.Children[2]?.Text;
+            return !string.IsNullOrWhiteSpace(orbType);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>Left-clicks the centre of a UI rect, which the client reports window-relative.</summary>
+    private async Task LowerPriceClickElement(RectangleF rect)
+    {
+        var windowTopLeft = GameController.Window.GetWindowRectangleTimeCache.TopLeft;
+        var target = new Vector2(windowTopLeft.X + rect.X + rect.Width / 2f,
+                                 windowTopLeft.Y + rect.Y + rect.Height / 2f);
+
+        Utility.Mouse.moveMouse(target);
+        await LowerPriceActionStep();
+        Utility.Mouse.LeftDown();
+        await LowerPriceActionStep();
+        Utility.Mouse.LeftUp();
+        await LowerPriceActionStep();
+    }
+
+    private async Task LowerPriceActionStep()
+    {
+        await TaskUtils.NextFrame();
+        await Task.Delay(LowerPriceStepDelayMs);
+    }
+
+    private static async Task<bool> WaitForLowerPriceCondition(Func<bool> condition, int timeoutMs)
+    {
+        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+        while (true)
+        {
+            try
+            {
+                if (condition()) return true;
+            }
+            catch
+            {
+                // Element torn down between frames; treat as "not yet" and keep polling.
+            }
+
+            if (stopwatch.ElapsedMilliseconds >= timeoutMs) return false;
+            await Task.Delay(25);
         }
     }
 
@@ -756,7 +1407,7 @@ public partial class TradeUtils
             }
 
             var timeSinceLastReprice = DateTime.Now - _lowerPriceLastRepriceTime;
-            var timerDuration = TimeSpan.FromMinutes(LowerPriceSettings.TimerDurationMinutes.Value);
+            var timerDuration = TimeSpan.FromMinutes(LowerPriceTimerMinutes);
             var timeRemaining = timerDuration - timeSinceLastReprice;
 
             if (timeRemaining <= TimeSpan.Zero)
@@ -765,10 +1416,7 @@ public partial class TradeUtils
                 if (!_lowerPriceTimerExpired)
                 {
                     _lowerPriceTimerExpired = true;
-                    if (LowerPriceSettings.EnableSoundNotification.Value)
-                    {
-                        PlayLowerPriceSoundNotification();
-                    }
+                    PlayLowerPriceSoundNotification();
                 }
                 
                 var pos = new Vector2(10, 60);
@@ -831,25 +1479,35 @@ public partial class TradeUtils
     {
         lock (_lowerPriceCurrencyRatesLock)
         {
-            // Initialize with -1 to indicate rates need to be loaded from API
-            _lowerPriceCurrencyRates["chaos_to_divine"] = -1m;
-            _lowerPriceCurrencyRates["chaos_to_exalted"] = -1m;
-            _lowerPriceCurrencyRates["divine_to_chaos"] = -1m;
-            _lowerPriceCurrencyRates["divine_to_exalted"] = -1m;
-            _lowerPriceCurrencyRates["exalted_to_chaos"] = -1m;
-            _lowerPriceCurrencyRates["exalted_to_divine"] = -1m;
-            _lowerPriceCurrencyRates["annul_to_chaos"] = -1m;
-            _lowerPriceCurrencyRates["annul_to_divine"] = -1m;
-            _lowerPriceCurrencyRates["annul_to_exalted"] = -1m;
+            // Chaos is the unit of account, so it is known without the API. Every other
+            // currency stays absent until poe.ninja answers; an absent entry means "unpriced",
+            // which the display reports rather than silently counting as zero.
+            _lowerPriceChaosValues.Clear();
+            _lowerPriceChaosValues["Chaos Orb"] = 1m;
         }
     }
 
     private async Task UpdateLowerPriceCurrencyRates()
     {
-        if (!LowerPriceSettings.AutoUpdateRates) return;
-        
+        // Rates always refresh. Leaving them stale is never what anyone wanted, and the step-down
+        // refuses to price against an old table anyway.
+
+        // Resolve the league before the interval check, not after. Prices are only meaningful for
+        // one league, so a league that has since resolved has to invalidate the table immediately
+        // rather than wait out the refresh interval.
+        string league = ResolveLeagueOrNull();
+        if (league == null) return; // not known yet; the API lookup is already in flight
+
+        var leagueChanged = !string.Equals(league, _lowerPriceRatesLeague, StringComparison.OrdinalIgnoreCase);
+
         var timeSinceUpdate = DateTime.Now - _lowerPriceLastCurrencyUpdate;
-        if (timeSinceUpdate.TotalMinutes < LowerPriceSettings.CurrencyUpdateInterval.Value) return;
+        if (!leagueChanged && timeSinceUpdate.TotalMinutes < LowerPriceRateRefreshMinutes) return;
+        if (DateTime.Now < _lowerPriceRatesNextAttempt) return;
+
+        // The render loop calls this every frame, so once the interval expires every frame in
+        // flight passes the check above at once and fires its own request. poe.ninja asks callers
+        // to be reasonable with concurrency, so let exactly one fetch run at a time.
+        if (System.Threading.Interlocked.Exchange(ref _lowerPriceRatesFetching, 1) == 1) return;
 
         try
         {
@@ -857,8 +1515,11 @@ public partial class TradeUtils
             // This only powers the value display and cross-currency overrides — percentage
             // repricing works without it, so any failure here is non-fatal (keep default rates).
             JsonDocument jsonDoc = null;
-            string league = ResolveLeague();
-            string ninjaUrl = $"https://poe.ninja/api/data/currencyoverview?league={Uri.EscapeDataString(league)}&type=Currency";
+            // poe.ninja's legacy /api/data/currencyoverview and /api/data/itemoverview endpoints
+            // were retired and now answer 404 for every league. The current economy API is
+            // /poe1/api/economy/exchange/current/overview, documented at https://poe.ninja/docs/api.
+            // Responses are HTTP-cached ~5 minutes, so CurrencyUpdateInterval must stay >= 5 (it is).
+            string ninjaUrl = $"https://poe.ninja/poe1/api/economy/exchange/current/overview?league={Uri.EscapeDataString(league)}&type=Currency";
             try
             {
                 using (var ninjaReq = new HttpRequestMessage(HttpMethod.Get, ninjaUrl))
@@ -873,7 +1534,7 @@ public partial class TradeUtils
                         }
                         else
                         {
-                            LogMessage($"LowerPrice: poe.ninja returned HTTP {(int)ninjaResp.StatusCode} for league '{league}'. Currency value display is unavailable (percentage repricing is unaffected). poe.ninja's data API may have moved — see README.");
+                            LogMessage($"LowerPrice: poe.ninja returned HTTP {(int)ninjaResp.StatusCode} for league '{league}'. Currency value display is unavailable (percentage repricing is unaffected).");
                         }
                     }
                 }
@@ -901,36 +1562,83 @@ public partial class TradeUtils
                 }
 
                 if (jsonDoc == null)
-                    return; // Keep default rates; non-fatal.
-            }
-            
-            lock (_lowerPriceCurrencyRatesLock)
-            {
-                // Parse poe.ninja currency data for POE1 format
-                if (jsonDoc.RootElement.TryGetProperty("lines", out var lines))
                 {
-                    foreach (var line in lines.EnumerateArray())
-                    {
-                        if (line.TryGetProperty("currencyTypeName", out var currName) &&
-                            line.TryGetProperty("chaosEquivalent", out var chaosEq))
-                        {
-                            string currency = currName.GetString();
-                            decimal chaosValue = chaosEq.GetDecimal();
-                            
-                            if (chaosValue > 0)
-                            {
-                                _lowerPriceCurrencyRates[$"{currency.ToLower()}_to_chaos"] = chaosValue;
-                            }
-                        }
-                    }
+                    _lowerPriceRatesNextAttempt = DateTime.Now.AddMinutes(2);
+                    return; // Keep default rates; non-fatal.
                 }
             }
             
+            // The economy API splits the data in two: "items" maps a currency id to its display
+            // name ("annul" -> "Orb of Annulment"), "lines" maps that id to its chaos price
+            // ("annul" -> 12.14). Joining them gives a name-keyed table that matches the orb
+            // names read off the item tooltips verbatim, so every currency is priceable rather
+            // than only the four that used to be hardcoded.
+            var idToName = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            if (jsonDoc.RootElement.TryGetProperty("items", out var itemsEl) &&
+                itemsEl.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var item in itemsEl.EnumerateArray())
+                {
+                    if (item.TryGetProperty("id", out var idEl) &&
+                        item.TryGetProperty("name", out var nameEl))
+                    {
+                        var id = idEl.GetString();
+                        var name = nameEl.GetString();
+                        if (!string.IsNullOrWhiteSpace(id) && !string.IsNullOrWhiteSpace(name))
+                            idToName[id] = name;
+                    }
+                }
+            }
+
+            var parsed = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
+            if (jsonDoc.RootElement.TryGetProperty("lines", out var lines) &&
+                lines.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var line in lines.EnumerateArray())
+                {
+                    if (!line.TryGetProperty("id", out var idEl) ||
+                        !line.TryGetProperty("primaryValue", out var valEl))
+                        continue;
+
+                    var id = idEl.GetString();
+                    if (string.IsNullOrWhiteSpace(id)) continue;
+                    if (!idToName.TryGetValue(id, out var name)) continue;
+                    if (valEl.ValueKind != JsonValueKind.Number) continue;
+
+                    var chaosValue = valEl.GetDecimal();
+                    if (chaosValue > 0)
+                        parsed[name] = chaosValue;
+                }
+            }
+
+            if (parsed.Count == 0)
+            {
+                // poe.ninja answers 200 with an empty payload for a league it doesn't know, so an
+                // empty result means a bad league name far more often than a dead market.
+                LogMessage($"LowerPrice: poe.ninja returned no currency prices for league '{league}'. Check that the league name is correct; value totals will show as unavailable.");
+                _lowerPriceRatesNextAttempt = DateTime.Now.AddMinutes(2);
+                return;
+            }
+
+            lock (_lowerPriceCurrencyRatesLock)
+            {
+                _lowerPriceChaosValues = parsed;
+                _lowerPriceChaosValues["Chaos Orb"] = 1m;
+            }
+
+            _lowerPriceRatesLeague = league;
             _lowerPriceLastCurrencyUpdate = DateTime.Now;
+            _lowerPriceRatesNextAttempt = DateTime.MinValue;
+            LogMessage($"LowerPrice: loaded {parsed.Count} currency rates for league '{league}' " +
+                       $"(1 Divine = {GetLowerPriceChaosValue("Divine Orb"):F1} chaos).");
         }
         catch (Exception ex)
         {
             LogError($"Failed to update currency rates: {ex.Message}");
+        }
+        finally
+        {
+            System.Threading.Interlocked.Exchange(ref _lowerPriceRatesFetching, 0);
         }
     }
 
@@ -960,36 +1668,64 @@ public partial class TradeUtils
                 return;
             }
 
-            var itemValues = CalculateLowerPriceItemValues(items);
-            
-            var pos = new Vector2(LowerPriceSettings.ValueDisplayX.Value, LowerPriceSettings.ValueDisplayY.Value);
-            
-            // Create value display text
+            var pos = new Vector2(LowerPriceValueDisplayX, LowerPriceValueDisplayY);
             var totalItemsInTab = items?.Count() ?? 0;
-            var displayText = $"Items in tab: {itemValues.ItemsWithPricing}/{totalItemsInTab}\n";
-            displayText += $"Items for sale: {itemValues.TotalItems}\n";
-            
-            if (itemValues.ChaosTotal > 0)
-                displayText += $"Chaos: {itemValues.ChaosTotal:F0}\n";
-            if (itemValues.DivineTotal > 0)
-                displayText += $"Divines: {itemValues.DivineTotal:F1}\n";
-            if (itemValues.ExaltedTotal > 0)
-                displayText += $"Exalts: {itemValues.ExaltedTotal:F1}\n";
-            if (itemValues.AnnulTotal > 0)
-                displayText += $"Annuls: {itemValues.AnnulTotal:F0}\n";
-            
-            displayText += $"\nTotal in Divine: {itemValues.TotalInDivine:F1}\n";
-            displayText += $"Total in Exalts: {itemValues.TotalInExalted:F1}";
-            
-            // Warning if tooltip count doesn't match total items
-            if (items != null)
+
+            // Prefer the last all-tabs scan for this tab. Reading prices out of the game means
+            // reading hover tooltips, and the client doesn't build a tooltip until you actually
+            // hover the item — so the in-game path can only ever see what you've already touched.
+            // The API scan has every price whether or not you hovered anything.
+            var scanned = GetScannedValueForOpenTab();
+            var divineInChaos = GetLowerPriceChaosValue("Divine Orb");
+
+            string displayText;
+            if (scanned != null)
             {
-                var itemsWithTooltips = items.Where(i => i.Tooltip != null).Count();
-                var totalItems = items.Count();
-                
-                if (itemsWithTooltips < totalItems)
+                displayText = $"Items in tab: {scanned.ItemsPriced}/{totalItemsInTab}  (scanned)\n";
+
+                foreach (var orb in scanned.OrbTotals
+                             .OrderByDescending(o => GetLowerPriceChaosValue(o.Key) * o.Value)
+                             .ThenBy(o => o.Key))
                 {
-                    displayText += $"\n⚠️ Hover over items to load pricing data!";
+                    displayText += $"{orb.Key}: {orb.Value:N0}\n";
+                }
+
+                displayText += $"\nTotal in Chaos: {scanned.ChaosTotal:N0}\n";
+                displayText += divineInChaos > 0
+                    ? $"Total in Divine: {scanned.ChaosTotal / divineInChaos:F2}"
+                    : "Total in Divine: rates unavailable";
+
+                if (scanned.UnpricedItems > 0)
+                    displayText += $"\n({scanned.UnpricedItems} item(s) in an unpriced currency)";
+            }
+            else
+            {
+                var itemValues = CalculateLowerPriceItemValues(items);
+
+                displayText = $"Items in tab: {itemValues.ItemsWithPricing}/{totalItemsInTab}\n";
+                displayText += $"Items for sale: {itemValues.TotalItems}\n";
+
+                // Breakdown, most valuable currency first.
+                foreach (var orb in itemValues.OrbTotals
+                             .OrderByDescending(o => GetLowerPriceChaosValue(o.Key) * o.Value)
+                             .ThenBy(o => o.Key))
+                {
+                    displayText += $"{orb.Key}: {orb.Value:N0}\n";
+                }
+
+                displayText += $"\nTotal in Chaos: {itemValues.TotalInChaos:N0}\n";
+                displayText += itemValues.DivineRateKnown
+                    ? $"Total in Divine: {itemValues.TotalInDivine:F2}"
+                    : "Total in Divine: rates unavailable";
+
+                if (itemValues.UnpricedItems > 0)
+                    displayText += $"\n({itemValues.UnpricedItems} item(s) in an unpriced currency)";
+
+                // Only relevant on the tooltip path; a scan makes hovering unnecessary.
+                if (items != null && items.Count(i => i.Tooltip != null) < totalItemsInTab)
+                {
+                    displayText += $"\n⚠️ Not scanned — hover items, or press " +
+                                   $"{LowerPriceSettings.StashScanHotkey.Value} to scan all tabs.";
                 }
             }
 
@@ -1006,7 +1742,13 @@ public partial class TradeUtils
         }
     }
 
-    private ItemValueSummary CalculateLowerPriceItemValues(IEnumerable<dynamic> items)
+    // Takes the concrete element type rather than IEnumerable<dynamic> on purpose. With dynamic,
+    // every member access below binds at runtime, and C# cannot resolve EXTENSION methods on a
+    // dynamic receiver — so `child1.Children.Last()` threw RuntimeBinderException ("IList<Element>
+    // does not contain a definition for 'Last'") for every single item. The per-item
+    // catch swallowed it, so the panel silently reported 0 priced items no matter what was in the
+    // tab. Statically typed, Last() resolves normally.
+    private ItemValueSummary CalculateLowerPriceItemValues(IEnumerable<NormalInventoryItem> items)
     {
         var summary = new ItemValueSummary();
         var totalItemsProcessed = 0;
@@ -1086,44 +1828,35 @@ public partial class TradeUtils
                     
                     itemsWithPricing++;
                     summary.TotalItems++;
-            
-                    lock (_lowerPriceCurrencyRatesLock)
-                    {
-                        switch (orbType)
-                        {
-                            case "Chaos Orb":
-                                summary.ChaosTotal += price;
-                                summary.TotalInDivine += price * GetLowerPriceRate("chaos_to_divine");
-                                summary.TotalInExalted += price * GetLowerPriceRate("chaos_to_exalted");
-                                break;
-                            case "Divine Orb":
-                                summary.DivineTotal += price;
-                                summary.TotalInDivine += price;
-                                summary.TotalInExalted += price * GetLowerPriceRate("divine_to_exalted");
-                                break;
-                            case "Exalted Orb":
-                                summary.ExaltedTotal += price;
-                                summary.TotalInDivine += price * GetLowerPriceRate("exalted_to_divine");
-                                summary.TotalInExalted += price;
-                                break;
-                            case "Orb of Annulment":
-                                summary.AnnulTotal += price;
-                                summary.TotalInDivine += price * GetLowerPriceRate("annul_to_divine");
-                                summary.TotalInExalted += price * GetLowerPriceRate("annul_to_exalted");
-                                break;
-                        }
-                    }
+
+                    // Per-currency breakdown, keyed by whatever orb the item is actually priced
+                    // in. The old code only recognised four hardcoded orbs and dropped the rest.
+                    summary.OrbTotals.TryGetValue(orbType, out var orbSoFar);
+                    summary.OrbTotals[orbType] = orbSoFar + price;
+
+                    var chaosEach = GetLowerPriceChaosValue(orbType);
+                    if (chaosEach > 0)
+                        summary.TotalInChaos += price * chaosEach;
+                    else
+                        summary.UnpricedItems++;
                 }
-                catch
+                catch (Exception ex)
                 {
-                    // Skip this item if any error occurs
+                    // Skip this item, but say so once per session. Swallowing this silently is
+                    // exactly how the RuntimeBinderException above went unnoticed: the panel just
+                    // reported "0 items priced" forever with no error anywhere.
+                    if (!_lowerPriceValueScanErrorLogged)
+                    {
+                        _lowerPriceValueScanErrorLogged = true;
+                        LogError($"LowerPrice value display: failed to read a price from an item ({ex.GetType().Name}: {ex.Message}). The stash tooltip layout may have changed; totals will be incomplete.");
+                    }
                     continue;
                 }
             }
         }
-        catch
+        catch (Exception ex)
         {
-            // If any major error occurs, return current summary
+            LogError($"LowerPrice value display: item scan aborted ({ex.Message}).");
             return summary;
         }
         
@@ -1131,23 +1864,23 @@ public partial class TradeUtils
         summary.TotalItemsProcessed = totalItemsProcessed;
         summary.ItemsWithTooltips = itemsWithTooltips;
         summary.ItemsWithPricing = itemsWithPricing;
-        
+
+        // Convert the chaos total once, at the end, rather than per item.
+        var divineInChaos = GetLowerPriceChaosValue("Divine Orb");
+        summary.DivineRateKnown = divineInChaos > 0;
+        if (summary.DivineRateKnown)
+            summary.TotalInDivine = summary.TotalInChaos / divineInChaos;
+
         return summary;
     }
 
-    private decimal GetLowerPriceRate(string rateKey)
+    /// <summary>Chaos value of one unit of <paramref name="currencyName"/>, or 0 if unknown.</summary>
+    private decimal GetLowerPriceChaosValue(string currencyName)
     {
+        if (string.IsNullOrWhiteSpace(currencyName)) return 0m;
         lock (_lowerPriceCurrencyRatesLock)
         {
-            if (_lowerPriceCurrencyRates.TryGetValue(rateKey, out var rate))
-            {
-                if (rate == -1m)
-                {
-                    return 0m;
-                }
-                return rate;
-            }
-            return 0m;
+            return _lowerPriceChaosValues.TryGetValue(currencyName.Trim(), out var v) && v > 0 ? v : 0m;
         }
     }
 }
@@ -1158,11 +1891,18 @@ public class ItemValueSummary
     public int TotalItemsProcessed { get; set; }
     public int ItemsWithTooltips { get; set; }
     public int ItemsWithPricing { get; set; }
-    public decimal ChaosTotal { get; set; }
-    public decimal DivineTotal { get; set; }
-    public decimal ExaltedTotal { get; set; }
-    public decimal AnnulTotal { get; set; }
+
+    /// <summary>Sum of asking prices per orb type, e.g. "Divine Orb" -> 12.</summary>
+    public Dictionary<string, decimal> OrbTotals { get; } =
+        new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Items priced in a currency with no known chaos value, so absent from the totals.</summary>
+    public int UnpricedItems { get; set; }
+
+    public decimal TotalInChaos { get; set; }
     public decimal TotalInDivine { get; set; }
-    public decimal TotalInExalted { get; set; }
+
+    /// <summary>False when the divine rate hasn't loaded, so TotalInDivine is meaningless.</summary>
+    public bool DivineRateKnown { get; set; }
 }
 

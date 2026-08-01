@@ -101,9 +101,9 @@ public partial class TradeUtils
             LogMessage($"   Groups: {enabledGroups}/{totalGroups} enabled");
             LogMessage($"   Searches: {enabledSearches}/{totalSearches} enabled");
             LogMessage($"   Debug Mode: {Settings.LiveSearch.General.DebugMode.Value}");
-            LogMessage($"   Show GUI: {Settings.LiveSearch.General.ShowGui.Value}");
-            LogMessage($"   Play Sound: {Settings.LiveSearch.General.PlaySound.Value}");
-            LogMessage($"   Queue Delay: {Settings.LiveSearch.SearchSettings.SearchQueueDelay.Value}ms");
+            LogMessage($"   Show GUI: {true}");
+            LogMessage($"   Play Sound: {true}");
+            LogMessage($"   Queue Delay: {SearchQueueDelayMs}ms");
             
             if (enabledSearches == 0)
             {
@@ -158,7 +158,7 @@ public partial class TradeUtils
             if (_fastModePending)
             {
                 var now = DateTime.Now;
-                var totalClicks = Math.Max(1, (int)Math.Floor((Settings.LiveSearch.FastMode.FastModeClickDurationSec.Value * 1000f) / Math.Max(1, Settings.LiveSearch.FastMode.FastModeClickDelayMs.Value)));
+                var totalClicks = Math.Max(1, (int)Math.Floor((FastModeClickDurationSec * 1000f) / Math.Max(1, FastModeClickDelayMs)));
                 
                 LogMessage($"🚀 FAST MODE: Click {_fastModeClickCount + 1}/{totalClicks}, CtrlPressed={_fastModeCtrlPressed}");
                 
@@ -180,7 +180,7 @@ public partial class TradeUtils
                     return;
                 }
                 
-                int currentDelay = Settings.LiveSearch.FastMode.FastModeClickDelayMs.Value;
+                int currentDelay = FastModeClickDelayMs;
                 
                 if (_fastModeLastClickTime == DateTime.MinValue || (now - _fastModeLastClickTime).TotalMilliseconds >= currentDelay)
                 {
@@ -360,7 +360,7 @@ public partial class TradeUtils
                 
                 if (areaChangePurchaseWindowVisible && !_lastPurchaseWindowVisible)
                 {
-                    LogMessage($"🔔 PURCHASE WINDOW OPENED (During Area Cooldown): MoveMouseToItem={Settings.LiveSearch.AutoFeatures.MoveMouseToItem.Value}, TeleportedLocation={(_teleportedItemLocation.X != 0 || _teleportedItemLocation.Y != 0 ? $"({_teleportedItemLocation.X}, {_teleportedItemLocation.Y})" : "null")}");
+                    LogMessage($"🔔 PURCHASE WINDOW OPENED (During Area Cooldown): MoveMouseToItem={true}, TeleportedLocation={(_teleportedItemLocation.X != 0 || _teleportedItemLocation.Y != 0 ? $"({_teleportedItemLocation.X}, {_teleportedItemLocation.Y})" : "null")}");
                     
                     if (_tpLocked)
                             {
@@ -371,7 +371,7 @@ public partial class TradeUtils
                 }
                 
                 if (areaChangePurchaseWindowVisible && !_lastPurchaseWindowVisible &&
-                    Settings.LiveSearch.AutoFeatures.MoveMouseToItem.Value)
+                    true)
                 {
                     bool hasTeleportedItemLocation = _teleportedItemLocation.X != 0 || _teleportedItemLocation.Y != 0;
                     if (_allowMouseMovement && (_windowWasClosedSinceLastMovement || hasTeleportedItemLocation))
@@ -466,7 +466,7 @@ public partial class TradeUtils
             
             if (currentPurchaseWindowVisible && !_lastPurchaseWindowVisible)
             {
-                LogMessage($"🔔 PURCHASE WINDOW OPENED: MoveMouseToItem={Settings.LiveSearch.AutoFeatures.MoveMouseToItem.Value}, ForceAutoBuy={_forceAutoBuy}, TeleportedLocation={(_teleportedItemLocation.X != 0 || _teleportedItemLocation.Y != 0 ? $"({_teleportedItemLocation.X}, {_teleportedItemLocation.Y})" : "null")}, AllowMovement={_allowMouseMovement}");
+                LogMessage($"🔔 PURCHASE WINDOW OPENED: MoveMouseToItem={true}, ForceAutoBuy={_forceAutoBuy}, TeleportedLocation={(_teleportedItemLocation.X != 0 || _teleportedItemLocation.Y != 0 ? $"({_teleportedItemLocation.X}, {_teleportedItemLocation.Y})" : "null")}, AllowMovement={_allowMouseMovement}");
                 
                 // Unlock TP when purchase window opens
                 if (_tpLocked)
@@ -479,7 +479,7 @@ public partial class TradeUtils
             
             // Move mouse to item when window opens (if enabled and we have a location)
             if (currentPurchaseWindowVisible && !_lastPurchaseWindowVisible &&
-                Settings.LiveSearch.AutoFeatures.MoveMouseToItem.Value)
+                true)
             {
                 if (!_allowMouseMovement)
                 {
@@ -768,9 +768,9 @@ public partial class TradeUtils
         
         // Check if enough time has passed since last connection
         var timeSinceLastConnection = (DateTime.Now - _lastConnectionTime).TotalMilliseconds;
-        if (timeSinceLastConnection < Settings.LiveSearch.SearchSettings.SearchQueueDelay.Value)
+        if (timeSinceLastConnection < SearchQueueDelayMs)
         {
-            LogDebug($"⏳ DEBUG: Search queue delay active - {Settings.LiveSearch.SearchSettings.SearchQueueDelay.Value - timeSinceLastConnection:F0}ms remaining");
+            LogDebug($"⏳ DEBUG: Search queue delay active - {SearchQueueDelayMs - timeSinceLastConnection:F0}ms remaining");
             return;
         }
         
@@ -789,7 +789,7 @@ public partial class TradeUtils
         _listeners.Add(newListener);
         LogMessage($"🚀 STARTING FROM QUEUE: Search {config.SearchId.Value}");
         
-        LogDebug($"🔍 DEBUG: Search queue delay was {Settings.LiveSearch.SearchSettings.SearchQueueDelay.Value}ms, time since last connection: {timeSinceLastConnection:F0}ms");
+        LogDebug($"🔍 DEBUG: Search queue delay was {SearchQueueDelayMs}ms, time since last connection: {timeSinceLastConnection:F0}ms");
         
         newListener.Start(LogMessage, LogError, Settings.LiveSearch.SecureSessionId);
     }
@@ -826,7 +826,7 @@ public partial class TradeUtils
             }
             
             // Check if we can process more items this second
-            int maxItemsPerSecond = Settings.LiveSearch.RateLimiting.MaxItemsPerSecond.Value;
+            int maxItemsPerSecond = MaxItemsPerSecond;
             if (_itemsProcessedThisSecond >= maxItemsPerSecond)
             {
                 LogMessage($"⏳ BURST PROTECTION: Already processed {_itemsProcessedThisSecond}/{maxItemsPerSecond} items this second - waiting");
@@ -961,7 +961,7 @@ public partial class TradeUtils
                 }
                 
                 var searchConfig = !string.IsNullOrEmpty(searchId) ? GetSearchConfigBySearchId(searchId) : null;
-                bool fastModeEnabled = searchConfig?.FastMode.Value ?? Settings.LiveSearch.FastMode.FastMode.Value;
+                bool fastModeEnabled = searchConfig?.FastMode.Value ?? Settings.LiveSearch.AutoFeatures.FastMode.Value;
                 
                 if (fastModeEnabled)
                 {
@@ -976,9 +976,9 @@ public partial class TradeUtils
                     _fastModeLastClickTime = DateTime.MinValue;
                     _fastModeRetryCount = 0;
                     
-                    LogMessage($"🚀 FAST MODE INIT: duration={Settings.LiveSearch.FastMode.FastModeClickDurationSec.Value}s, delay={Settings.LiveSearch.FastMode.FastModeClickDelayMs.Value}ms");
+                    LogMessage($"🚀 FAST MODE INIT: duration={FastModeClickDurationSec}s, delay={FastModeClickDelayMs}ms");
                     
-                    var totalClicks = Math.Max(1, (int)Math.Floor((Settings.LiveSearch.FastMode.FastModeClickDurationSec.Value * 1000f) / Math.Max(1, Settings.LiveSearch.FastMode.FastModeClickDelayMs.Value)));
+                    var totalClicks = Math.Max(1, (int)Math.Floor((FastModeClickDurationSec * 1000f) / Math.Max(1, FastModeClickDelayMs)));
                     LogMessage($"🚀 FAST MODE: Will perform approximately {totalClicks} clicks");
                 }
             }
@@ -1058,7 +1058,7 @@ public partial class TradeUtils
                 System.Diagnostics.Process.Start("cmd", $"/c start {searchUrl}");
                 
                 // Add configurable delay between opening tabs
-                int delayMs = Settings.LiveSearch.SearchSettings.BrowserTabDelay.Value * 1000;
+                int delayMs = BrowserTabDelaySeconds * 1000;
                 System.Threading.Thread.Sleep(delayMs);
             }
             

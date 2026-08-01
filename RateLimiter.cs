@@ -55,9 +55,9 @@ public class QuotaGuard
                 _logMessage($"✅ QUOTA RESET: {state.Remaining}/{state.Max} available");
             }
 
-            // Get safety threshold from settings
-            var settings = _getSettings?.Invoke();
-            var safetyThreshold = settings?.RateLimiting.RateLimitSafetyThreshold.Value ?? 10;
+            // Fixed at 10%. This was a setting, but a rate-limit margin is a safety mechanism
+            // rather than a preference — lowering it only ever earns a ban from GGG's API.
+            const int safetyThreshold = 10;
 
             // Calculate how many requests to reserve based on threshold
             // ALWAYS reserve at least 1 request, even if threshold is 0%

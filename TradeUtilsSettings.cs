@@ -26,6 +26,11 @@ public class TradeUtilsSettings : ISettings
     [Menu("Auto-Detect League", "Use the league your character is currently in for trade searches and currency rates. Leave this ON so searches keep working after every league launch (fixes the 'Invalid query' error from the old hardcoded league). Turn OFF only if you want to force a manually-set league per search.")]
     public ToggleNode AutoDetectLeague { get; set; } = new ToggleNode(true);
 
+    // One delay for every sub-plugin that drives the UI, rather than a separate pair each. A random
+    // third is added on top automatically, so there's no separate jitter slider any more.
+    [Menu("Action Delay (ms)", "Pause between UI actions, so input doesn't arrive faster than the client draws")]
+    public RangeNode<int> ActionDelay { get; set; } = new RangeNode<int>(75, 10, 1000);
+
     [Menu("Live Search Settings")]
     public LiveSearchSubSettings LiveSearch { get; set; }
     
@@ -69,16 +74,7 @@ public class LiveSearchSubSettings
         set => EncryptedSettings.StoreSecureSessionId(value);
     }
     [Submenu(CollapsedByDefault = true)]
-    public SearchSettingsSubMenu SearchSettings { get; set; } = new SearchSettingsSubMenu();
-
-    [Submenu(CollapsedByDefault = true)]
     public AutoFeaturesSubMenu AutoFeatures { get; set; } = new AutoFeaturesSubMenu();
-
-    [Submenu(CollapsedByDefault = true)]
-    public FastModeSubMenu FastMode { get; set; } = new FastModeSubMenu();
-
-    [Submenu(CollapsedByDefault = true)]
-    public RateLimitingSubMenu RateLimiting { get; set; } = new RateLimitingSubMenu();
 
     // ===== INTERNAL SETTINGS =====
     [JsonIgnore]
@@ -404,9 +400,8 @@ public class LiveSearchSubSettings
                             string searchUrl = $"https://www.pathofexile.com/trade/search/{Uri.EscapeDataString(finalLeague)}/{searchId}";
                             System.Diagnostics.Process.Start("cmd", $"/c start {searchUrl}");
 
-                            // Add configurable delay between opening tabs
-                            int delayMs = _parent.SearchSettings.BrowserTabDelay.Value * 1000; // Convert seconds to milliseconds
-                            System.Threading.Thread.Sleep(delayMs);
+                            // Space the tabs out so the browser doesn't drop any of them.
+                            System.Threading.Thread.Sleep(5 * 1000);
                         }
                     }
                 }
@@ -446,14 +441,15 @@ public class GeneralSettingsSubMenu
         SessionIdConfig = new SessionIdRenderer(parent);
     }
 
+    // The one debug switch for the whole plugin — there used to be four, one per sub-plugin.
+    [Menu("Debug Mode", "Verbose logging across every part of the plugin")]
     public ToggleNode DebugMode { get; set; } = new ToggleNode(false);
 
-    public ToggleNode ShowGui { get; set; } = new ToggleNode(true);
-
-    public ToggleNode PlaySound { get; set; } = new ToggleNode(true);
-
+    [Menu("Travel Hotkey", "Teleport to the most recent search result")]
     public HotkeyNode TravelHotkey { get; set; } = new HotkeyNode(Keys.None);
 
+    // Also stops bulk buy; that had its own duplicate hotkey before.
+    [Menu("Stop All Hotkey", "Stop every running search and any bulk buy in progress")]
     public HotkeyNode StopAllHotkey { get; set; } = new HotkeyNode(Keys.None);
 
     public SessionIdRenderer SessionIdConfig { get; set; }
@@ -509,64 +505,19 @@ public class GeneralSettingsSubMenu
 }
 
 [Submenu(CollapsedByDefault = false)]
-public class SearchSettingsSubMenu
-{
-    [Menu("Search Queue Delay (ms)", "Delay between starting live searches (250-10000ms)")]
-    public RangeNode<int> SearchQueueDelay { get; set; } = new RangeNode<int>(1000, 250, 10000);
-
-    [Menu("Max Recent Items", "Maximum number of recent items to keep in the list")]
-    public RangeNode<int> MaxRecentItems { get; set; } = new RangeNode<int>(5, 1, 20);
-
-    [Menu("Log Search Results", "Enable logging of search results to a text file")]
-    public ToggleNode LogSearchResults { get; set; } = new ToggleNode(true);
-
-    [Menu("Browser Tab Delay", "Delay between opening browser tabs (seconds)")]
-    public RangeNode<int> BrowserTabDelay { get; set; } = new RangeNode<int>(5, 1, 20);
-}
-
-[Submenu(CollapsedByDefault = false)]
 public class AutoFeaturesSubMenu
 {
     [Menu("Auto Teleport", "Automatically teleport to items")]
     public ToggleNode AutoTp { get; set; } = new ToggleNode(false);
-
-    [Menu("Move Mouse to Item", "Move mouse cursor to highlighted items")]
-    public ToggleNode MoveMouseToItem { get; set; } = new ToggleNode(true);
 
     [Menu("Auto Buy", "Automatically Ctrl+Left Click after moving mouse to item")]
     public ToggleNode AutoBuy { get; set; } = new ToggleNode(false);
 
     [Menu("Auto Stash", "Automatically stash items when inventory is full")]
     public ToggleNode AutoStash { get; set; } = new ToggleNode(false);
-}
 
-[Submenu(CollapsedByDefault = false)]
-public class FastModeSubMenu
-{
     [Menu("Fast Mode", "Bypass window checks and directly click after teleport")]
     public ToggleNode FastMode { get; set; } = new ToggleNode(false);
-
-    [Menu("Fast Mode Click Delay (ms)", "Delay between clicks. Keep low for speed; raise if your client stutters.")]
-    public RangeNode<int> FastModeClickDelayMs { get; set; } = new RangeNode<int>(100, 10, 1000);
-
-    [Menu("Fast Mode Click Duration (s)", "How long to keep clicking after teleport. In seconds, because stash data can take between ~0.1s and 2–3s to fully load in hideouts.")]
-    public RangeNode<float> FastModeClickDurationSec { get; set; } = new RangeNode<float>(2.5f, 0.1f, 5.0f);
-}
-
-[Submenu(CollapsedByDefault = false)]
-public class RateLimitingSubMenu
-{
-    [Menu("Rate Limit Safety Threshold (%)", "Block requests when remaining quota drops below this percentage")]
-    public RangeNode<int> RateLimitSafetyThreshold { get; set; } = new RangeNode<int>(10, 5, 25);
-
-    [Menu("Burst Protection", "Enable protection against processing too many items at once")]
-    public ToggleNode BurstProtection { get; set; } = new ToggleNode(true);
-
-    [Menu("Max Items Per Second", "Maximum number of items to process per second")]
-    public RangeNode<int> MaxItemsPerSecond { get; set; } = new RangeNode<int>(3, 1, 10);
-
-    [Menu("Burst Queue Size", "Maximum number of items to queue for processing")]
-    public RangeNode<int> BurstQueueSize { get; set; } = new RangeNode<int>(20, 0, 100);
 }
 
 // ==================== LOWERPRICE SUB-PLUGIN SETTINGS ====================
@@ -576,220 +527,47 @@ public class LowerPriceSubSettings
     [Menu("Enable LowerPrice", "Enable or disable the LowerPrice sub-plugin")]
     public ToggleNode Enable { get; set; } = new ToggleNode(false);
 
-    // Grouped submenus
-    [Submenu(CollapsedByDefault = true)] public LpActionTimingSubMenu ActionTiming { get; set; }
-    [Submenu(CollapsedByDefault = true)] public LpCurrencySelectionSubMenu CurrencySelection { get; set; }
-    [Submenu(CollapsedByDefault = true)] public LpPricingStrategySubMenu PricingStrategy { get; set; }
-    [Submenu(CollapsedByDefault = true)] public LpOverridesSubMenu Overrides { get; set; }
-    [Submenu(CollapsedByDefault = true)] public LpSpecialActionsSubMenu SpecialActions { get; set; }
-    [Submenu(CollapsedByDefault = true)] public LpTimerNotificationsSubMenu TimerNotifications { get; set; }
-    [Submenu(CollapsedByDefault = true)] public LpValueDisplaySubMenu ValueDisplay { get; set; }
-    [Submenu(CollapsedByDefault = true)] public LpCurrencyRatesSubMenu CurrencyRates { get; set; }
-    [Submenu(CollapsedByDefault = true)] public LpUiDebugSubMenu UiAndDebug { get; set; }
-
-    public LowerPriceSubSettings()
-    {
-        ActionTiming = new LpActionTimingSubMenu(this);
-        CurrencySelection = new LpCurrencySelectionSubMenu(this);
-        PricingStrategy = new LpPricingStrategySubMenu(this);
-        Overrides = new LpOverridesSubMenu(this);
-        SpecialActions = new LpSpecialActionsSubMenu(this);
-        TimerNotifications = new LpTimerNotificationsSubMenu(this);
-        ValueDisplay = new LpValueDisplaySubMenu(this);
-        CurrencyRates = new LpCurrencyRatesSubMenu(this);
-        UiAndDebug = new LpUiDebugSubMenu(this);
-    }
-
-    [Menu("Action Delay (ms)", "Delay between actions to simulate human behavior")]
-    [IgnoreMenu]
-    public RangeNode<int> ActionDelay { get; set; } = new RangeNode<int>(75, 50, 1000);
-
-    [Menu("Random Delay (ms)", "Random delay added to action delay (0-100ms)")]
-    [IgnoreMenu]
-    public RangeNode<int> RandomDelay { get; set; } = new RangeNode<int>(25, 0, 100);
-
-    // ===== CURRENCY SELECTION =====
-    [Menu("Reprice Chaos Orb", "Enable repricing for Chaos Orbs")]
-    [IgnoreMenu]
-    public ToggleNode RepriceChaos { get; set; } = new ToggleNode(true);
-
-    [Menu("Reprice Divine Orb", "Enable repricing for Divine Orbs")]
-    [IgnoreMenu]
+    // ===== WHAT TO REPRICE =====
+    // Chaos, Exalted and Annulment listings are always repriced. Divine and Mirror get their own
+    // opt-out because a mistake on those is worth the most.
+    [Menu("Reprice Divine Orb listings", "Turn off to leave Divine-priced items alone")]
     public ToggleNode RepriceDivine { get; set; } = new ToggleNode(true);
 
-    [Menu("Reprice Exalted Orb", "Enable repricing for Exalted Orbs")]
-    [IgnoreMenu]
-    public ToggleNode RepriceExalted { get; set; } = new ToggleNode(true);
-
-    [Menu("Reprice Annul Orb", "Enable repricing for Annul Orbs")]
-    [IgnoreMenu]
-    public ToggleNode RepriceAnnul { get; set; } = new ToggleNode(true);
+    [Menu("Reprice Mirror of Kalandra listings", "Off by default — an automated mistake costs the most here")]
+    public ToggleNode RepriceMirror { get; set; } = new ToggleNode(false);
 
     // ===== PRICING STRATEGY =====
-    [Menu("Use Flat Reduction", "Use flat number reduction instead of percentage")]
-    [IgnoreMenu]
+    [Menu("Use Flat Reduction", "Subtract a fixed amount each run instead of multiplying by the ratio")]
     public ToggleNode UseFlatReduction { get; set; } = new ToggleNode(false);
 
-    [Menu("Price Ratio", "Multiplier for item prices (0.0–1.0)")]
-    [IgnoreMenu]
+    [Menu("Price Ratio", "Multiplier applied to the price each run (0.9 = drop it by 10%)")]
     public RangeNode<float> PriceRatio { get; set; } = new RangeNode<float>(0.9f, 0.0f, 1.0f);
 
-    [Menu("Flat Reduction Amount", "Amount to subtract from item prices")]
-    [IgnoreMenu]
+    [Menu("Flat Reduction Amount", "Amount subtracted each run when Use Flat Reduction is on")]
     public RangeNode<int> FlatReductionAmount { get; set; } = new RangeNode<int>(1, 1, 100);
 
-    // Currency-specific overrides
-    [Menu("Divine Override", "Force flat reduction for Divine Orbs (overrides global setting)")]
-    [IgnoreMenu]
-    public ToggleNode DivineUseFlat { get; set; } = new ToggleNode(true);
+    // ===== AT THE BOTTOM OF THE RANGE =====
+    [Menu("Step Down Currency", "Once a price gets low, every further cut is enormous — 3 Divine to 2 is 33%, 2 to 1 is 50%, and 1 can't be lowered at all. With this on, a listing at or below the threshold is relisted in the next cheaper currency at the poe.ninja equivalent (Mirror to Divine to Chaos), so it keeps stepping down in fine increments instead. Needs poe.ninja rates.")]
+    public ToggleNode StepDownCurrency { get; set; } = new ToggleNode(false);
 
-    [Menu("Chaos Override", "Force flat reduction for Chaos Orbs (overrides global setting)")]
-    [IgnoreMenu]
-    public ToggleNode ChaosUseRatio { get; set; } = new ToggleNode(true);
+    [Menu("Step Down At or Below", "Step to the cheaper currency once the price is this low. At 3, a listing at 3, 2 or 1 Divine converts to Chaos rather than taking a 33-50% cut.")]
+    public RangeNode<int> StepDownAtOrBelow { get; set; } = new RangeNode<int>(3, 1, 50);
 
-    [Menu("Exalted Override", "Force flat reduction for Exalted Orbs (overrides global setting)")]
-    [IgnoreMenu]
-    public ToggleNode ExaltedUseRatio { get; set; } = new ToggleNode(true);
-
-    [Menu("Annul Override", "Force flat reduction for Annul Orbs (overrides global setting)")]
-    [IgnoreMenu]
-    public ToggleNode AnnulUseFlat { get; set; } = new ToggleNode(true);
-
-    // ===== SPECIAL ACTIONS =====
-    [Menu("Pickup Items at 1 Currency", "Control-left-click items priced at 1 instead of repricing")]
-    [IgnoreMenu]
+    [Menu("Pickup Items at 1 Currency", "Control-left-click items priced at 1 instead of repricing. Ignored when Step Down Currency handles the item first.")]
     public ToggleNode PickupItemsAtOne { get; set; } = new ToggleNode(false);
 
+    // ===== HOTKEYS & DISPLAY =====
     [Menu("Reprice Hotkey", "Hotkey to trigger repricing manually")]
-    [IgnoreMenu]
     public HotkeyNode ManualRepriceHotkey { get; set; } = new HotkeyNode(Keys.None);
 
-    // ===== TIMER & NOTIFICATIONS =====
-    [Menu("Enable Timer", "Enable timer functionality")]
-    [IgnoreMenu]
-    public ToggleNode EnableTimer { get; set; } = new ToggleNode(false);
+    [Menu("Scan All Tabs Hotkey", "Fetches every stash tab's prices from GGG's API. Rate limited, so use sparingly.")]
+    public HotkeyNode StashScanHotkey { get; set; } = new HotkeyNode(System.Windows.Forms.Keys.F6);
 
-    [Menu("Timer Duration (minutes)", "How long to wait before playing sound notification")]
-    [IgnoreMenu]
-    public RangeNode<int> TimerDurationMinutes { get; set; } = new RangeNode<int>(60, 1, 300);
-
-    [Menu("Show Timer Countdown", "Display countdown timer on screen")]
-    [IgnoreMenu]
-    public ToggleNode ShowTimerCountdown { get; set; } = new ToggleNode(true);
-
-    [Menu("Enable Sound Notification", "Play sound when timer expires")]
-    [IgnoreMenu]
-    public ToggleNode EnableSoundNotification { get; set; } = new ToggleNode(true);
-
-    // ===== VALUE DISPLAY =====
-    [Menu("Show Value Display", "Display total value of items in merchant panel")]
-    [IgnoreMenu]
+    [Menu("Show Value Display", "Display the value of items in the merchant panel, and the last all-tabs scan")]
     public ToggleNode ShowValueDisplay { get; set; } = new ToggleNode(true);
 
-    [Menu("Value Display Position X", "X position of value display")]
-    [IgnoreMenu]
-    public RangeNode<int> ValueDisplayX { get; set; } = new RangeNode<int>(10, 0, 2000);
-
-    [Menu("Value Display Position Y", "Y position of value display")]
-    [IgnoreMenu]
-    public RangeNode<int> ValueDisplayY { get; set; } = new RangeNode<int>(100, 0, 2000);
-
-    [Menu("Auto-Update Currency Rates", "Automatically fetch currency rates from poe.ninja")]
-    [IgnoreMenu]
-    public ToggleNode AutoUpdateRates { get; set; } = new ToggleNode(true);
-
-    [Menu("Currency Update Interval (minutes)", "How often to update currency rates")]
-    [IgnoreMenu]
-    public RangeNode<int> CurrencyUpdateInterval { get; set; } = new RangeNode<int>(30, 5, 120);
-    
-    [Menu("Debug Mode", "Enable detailed logging for debugging")]
-    [IgnoreMenu]
-    public ToggleNode DebugMode { get; set; } = new ToggleNode(false);
-    
-    [Menu("Show GUI", "Display the graphical user interface")]
-    [IgnoreMenu]
-    public ToggleNode ShowGui { get; set; } = new ToggleNode(true);
-}
-
-// ===== LOWER PRICE SUBMENU CLASSES =====
-public class LpActionTimingSubMenu
-{
-    private readonly LowerPriceSubSettings _p;
-    public LpActionTimingSubMenu(LowerPriceSubSettings p) { _p = p; }
-    [Menu("Action Delay (ms)")] public RangeNode<int> ActionDelay => _p.ActionDelay;
-    [Menu("Random Delay (ms)")] public RangeNode<int> RandomDelay => _p.RandomDelay;
-}
-
-public class LpCurrencySelectionSubMenu
-{
-    private readonly LowerPriceSubSettings _p;
-    public LpCurrencySelectionSubMenu(LowerPriceSubSettings p) { _p = p; }
-    [Menu("Reprice Chaos Orb")] public ToggleNode RepriceChaos => _p.RepriceChaos;
-    [Menu("Reprice Divine Orb")] public ToggleNode RepriceDivine => _p.RepriceDivine;
-    [Menu("Reprice Exalted Orb")] public ToggleNode RepriceExalted => _p.RepriceExalted;
-    [Menu("Reprice Annul Orb")] public ToggleNode RepriceAnnul => _p.RepriceAnnul;
-}
-
-public class LpPricingStrategySubMenu
-{
-    private readonly LowerPriceSubSettings _p;
-    public LpPricingStrategySubMenu(LowerPriceSubSettings p) { _p = p; }
-    [Menu("Use Flat Reduction")] public ToggleNode UseFlatReduction => _p.UseFlatReduction;
-    [Menu("Price Ratio")] public RangeNode<float> PriceRatio => _p.PriceRatio;
-    [Menu("Flat Reduction Amount")] public RangeNode<int> FlatReductionAmount => _p.FlatReductionAmount;
-}
-
-public class LpOverridesSubMenu
-{
-    private readonly LowerPriceSubSettings _p;
-    public LpOverridesSubMenu(LowerPriceSubSettings p) { _p = p; }
-    [Menu("Divine Override")] public ToggleNode DivineUseFlat => _p.DivineUseFlat;
-    [Menu("Chaos Override")] public ToggleNode ChaosUseRatio => _p.ChaosUseRatio;
-    [Menu("Exalted Override")] public ToggleNode ExaltedUseRatio => _p.ExaltedUseRatio;
-    [Menu("Annul Override")] public ToggleNode AnnulUseFlat => _p.AnnulUseFlat;
-}
-
-public class LpSpecialActionsSubMenu
-{
-    private readonly LowerPriceSubSettings _p;
-    public LpSpecialActionsSubMenu(LowerPriceSubSettings p) { _p = p; }
-    [Menu("Pickup Items at 1 Currency")] public ToggleNode PickupItemsAtOne => _p.PickupItemsAtOne;
-    [Menu("Reprice Hotkey")] public HotkeyNode ManualRepriceHotkey => _p.ManualRepriceHotkey;
-}
-
-public class LpTimerNotificationsSubMenu
-{
-    private readonly LowerPriceSubSettings _p;
-    public LpTimerNotificationsSubMenu(LowerPriceSubSettings p) { _p = p; }
-    [Menu("Enable Timer")] public ToggleNode EnableTimer => _p.EnableTimer;
-    [Menu("Timer Duration (minutes)")] public RangeNode<int> TimerDurationMinutes => _p.TimerDurationMinutes;
-    [Menu("Show Timer Countdown")] public ToggleNode ShowTimerCountdown => _p.ShowTimerCountdown;
-    [Menu("Enable Sound Notification")] public ToggleNode EnableSoundNotification => _p.EnableSoundNotification;
-}
-
-public class LpValueDisplaySubMenu
-{
-    private readonly LowerPriceSubSettings _p;
-    public LpValueDisplaySubMenu(LowerPriceSubSettings p) { _p = p; }
-    [Menu("Show Value Display")] public ToggleNode ShowValueDisplay => _p.ShowValueDisplay;
-    [Menu("Value Display Position X")] public RangeNode<int> ValueDisplayX => _p.ValueDisplayX;
-    [Menu("Value Display Position Y")] public RangeNode<int> ValueDisplayY => _p.ValueDisplayY;
-}
-
-public class LpCurrencyRatesSubMenu
-{
-    private readonly LowerPriceSubSettings _p;
-    public LpCurrencyRatesSubMenu(LowerPriceSubSettings p) { _p = p; }
-    [Menu("Auto-Update Currency Rates")] public ToggleNode AutoUpdateRates => _p.AutoUpdateRates;
-    [Menu("Currency Update Interval (minutes)")] public RangeNode<int> CurrencyUpdateInterval => _p.CurrencyUpdateInterval;
-}
-
-public class LpUiDebugSubMenu
-{
-    private readonly LowerPriceSubSettings _p;
-    public LpUiDebugSubMenu(LowerPriceSubSettings p) { _p = p; }
-    [Menu("Debug Mode")] public ToggleNode DebugMode => _p.DebugMode;
-    [Menu("Show GUI")] public ToggleNode ShowGui => _p.ShowGui;
+    [Menu("Enable Reprice Timer", "Play a sound and show a countdown when it's time to reprice again")]
+    public ToggleNode EnableTimer { get; set; } = new ToggleNode(false);
 }
 
 // ==================== BULKBUY SUB-PLUGIN SETTINGS ====================
@@ -799,11 +577,7 @@ public class BulkBuySubSettings
     public BulkBuySubSettings()
     {
         GroupsConfig = new BulkBuyGroupsRenderer(this);
-        General = new BbGeneralSubMenu(this);
-        TimingDelays = new BbTimingDelaysSubMenu(this);
-        Safety = new BbSafetySubMenu(this);
-        Logging = new BbLoggingSubMenu(this);
-        
+
         // Initialize timing preset values (Fast preset by default)
         TimingPreset = new ListNode();
         TimingPreset.Value = "Fast"; // Default to Fast preset
@@ -813,91 +587,25 @@ public class BulkBuySubSettings
     [Menu("Enable BulkBuy", "Enable or disable the BulkBuy sub-plugin")]
     public ToggleNode Enable { get; set; } = new ToggleNode(false);
 
-    [Menu("Enable Item Verification", "Verify item name and price from clipboard before clicking (experimental, off by default)")]
-    public ToggleNode EnableItemVerification { get; set; } = new ToggleNode(false);
-
-    [Menu("Debug Mode", "Enable detailed logging for debugging")]
-    [IgnoreMenu]
-    public ToggleNode DebugMode { get; set; } = new ToggleNode(false);
-
-    [IgnoreMenu]
-    public TextNode SessionId { get; set; } = new TextNode("");
-
     [Menu("Toggle BulkBuy Hotkey", "Key to start/stop bulk buying")]
-    [IgnoreMenu]
     public HotkeyNode ToggleHotkey { get; set; } = new HotkeyNode(Keys.None);
 
-    [Menu("Stop All Hotkey", "Key to emergency stop all bulk purchases")]
-    [IgnoreMenu]
-    public HotkeyNode StopAllHotkey { get; set; } = new HotkeyNode(Keys.None);
-
-    // ===== TIMING & DELAYS =====
     [Menu("Timing Preset", "Choose preset: Slow (slow PC/load times), Fast (normal), SuperFast (fast PC/load times)")]
-    [IgnoreMenu]
     public ListNode TimingPreset { get; set; } = new ListNode(); // Default to "Fast" (index 1)
 
-    [Menu("Timeout Per Item (seconds)", "Max time to wait for purchase window before moving to next item")]
-    [IgnoreMenu]
-    public RangeNode<int> TimeoutPerItem { get; set; } = new RangeNode<int>(3, 1, 10);
-
-    // ===== FINE-GRAINED TIMING CONTROLS =====
-    [Menu("Mouse Move Delay (ms)", "Delay after moving mouse before clicking (allows tooltip to appear)")]
-    [IgnoreMenu]
-    public RangeNode<int> MouseMoveDelay { get; set; } = new RangeNode<int>(50, 0, 500);
-
-    [Menu("Post-Click Delay (ms)", "Delay after clicking before checking if purchase succeeded")]
-    [IgnoreMenu]
-    public RangeNode<int> PostClickDelay { get; set; } = new RangeNode<int>(150, 50, 1000);
-
-    [Menu("Hideout Token Delay (ms)", "Delay after sending hideout token for tab switch")]
-    [IgnoreMenu]
-    public RangeNode<int> HideoutTokenDelay { get; set; } = new RangeNode<int>(150, 50, 500);
-
-    [Menu("Window Close Check Interval (ms)", "How often to check if old purchase window closed")]
-    [IgnoreMenu]
-    public RangeNode<int> WindowCloseCheckInterval { get; set; } = new RangeNode<int>(50, 25, 200);
-
-    [Menu("Loading Screen Check Interval (ms)", "How often to check if loading screen finished")]
-    [IgnoreMenu]
-    public RangeNode<int> LoadingCheckInterval { get; set; } = new RangeNode<int>(100, 50, 500);
-
-    [Menu("Retry Delay (ms)", "Delay between retry attempts when purchase fails")]
-    [IgnoreMenu]
-    public RangeNode<int> RetryDelay { get; set; } = new RangeNode<int>(300, 100, 1000);
-
-    // ===== SAFETY & LIMITS =====
-    [Menu("Auto-Resume After Rate Limit", "Automatically resume after rate limit cooldown")]
-    [IgnoreMenu]
-    public ToggleNode AutoResumeAfterRateLimit { get; set; } = new ToggleNode(true);
-
-    [Menu("Stop on Error", "Stop bulk buying if an error occurs")]
-    [IgnoreMenu]
+    [Menu("Stop on Error", "Stop bulk buying if an error occurs, instead of retrying and carrying on")]
     public ToggleNode StopOnError { get; set; } = new ToggleNode(false);
 
-    [Menu("Retry Failed Items", "Retry items that fail to purchase")]
-    [IgnoreMenu]
-    public ToggleNode RetryFailedItems { get; set; } = new ToggleNode(true);
-
-    [Menu("Max Retries Per Item", "Maximum retry attempts per failed item")]
-    [IgnoreMenu]
-    public RangeNode<int> MaxRetriesPerItem { get; set; } = new RangeNode<int>(2, 0, 5);
-
-    [Menu("Stop After Failed Items", "Stop bulk buying after this many failed items (0 = disabled)")]
-    [IgnoreMenu]
-    public RangeNode<int> StopAfterFailedItems { get; set; } = new RangeNode<int>(0, 0, 20);
-
-    // ===== LOGGING =====
-    [Menu("Log Purchases to File", "Save purchase log to CSV file")]
-    [IgnoreMenu]
-    public ToggleNode LogPurchasesToFile { get; set; } = new ToggleNode(true);
-
-    [Menu("Play Sound on Complete", "Play notification sound when bulk buy completes")]
-    [IgnoreMenu]
-    public ToggleNode PlaySoundOnComplete { get; set; } = new ToggleNode(true);
-
-    [Menu("Show Notifications", "Show toast notifications for important events")]
-    [IgnoreMenu]
-    public ToggleNode ShowNotifications { get; set; } = new ToggleNode(true);
+    // ===== PRESET-DRIVEN TIMING =====
+    // Not settings any more — ApplyTimingPreset() writes all of these, so exposing them as sliders
+    // alongside the preset that overwrites them was only ever a way to confuse people.
+    [IgnoreMenu] public RangeNode<int> TimeoutPerItem { get; set; } = new RangeNode<int>(3, 1, 10);
+    [IgnoreMenu] public RangeNode<int> MouseMoveDelay { get; set; } = new RangeNode<int>(50, 0, 500);
+    [IgnoreMenu] public RangeNode<int> PostClickDelay { get; set; } = new RangeNode<int>(150, 50, 1000);
+    [IgnoreMenu] public RangeNode<int> HideoutTokenDelay { get; set; } = new RangeNode<int>(150, 50, 500);
+    [IgnoreMenu] public RangeNode<int> WindowCloseCheckInterval { get; set; } = new RangeNode<int>(50, 25, 200);
+    [IgnoreMenu] public RangeNode<int> LoadingCheckInterval { get; set; } = new RangeNode<int>(100, 50, 500);
+    [IgnoreMenu] public RangeNode<int> RetryDelay { get; set; } = new RangeNode<int>(300, 100, 1000);
 
     // ===== GROUPS SYSTEM (like LiveSearch) =====
     public List<BulkBuyGroup> Groups { get; set; } = new List<BulkBuyGroup>();
@@ -923,66 +631,6 @@ public class BulkBuySubSettings
 
     [JsonIgnore]
     public int FailedPurchases { get; set; } = 0;
-
-    // Grouped submenu properties for BulkBuy (no global purchase limits; limits are per search)
-    [Submenu(CollapsedByDefault = true)] public BbGeneralSubMenu General { get; set; }
-    [Submenu(CollapsedByDefault = true)] public BbTimingDelaysSubMenu TimingDelays { get; set; }
-    [Submenu(CollapsedByDefault = true)] public BbSafetySubMenu Safety { get; set; }
-    [Submenu(CollapsedByDefault = true)] public BbLoggingSubMenu Logging { get; set; }
-}
-
-// ===== BULK BUY SUBMENU CLASSES =====
-public class BbGeneralSubMenu
-{
-    private readonly BulkBuySubSettings _p;
-    public BbGeneralSubMenu(BulkBuySubSettings p) { _p = p; }
-    [Menu("Debug Mode")] public ToggleNode DebugMode => _p.DebugMode;
-    [Menu("Toggle BulkBuy Hotkey")] public HotkeyNode ToggleHotkey => _p.ToggleHotkey;
-}
-
-public class BbTimingDelaysSubMenu
-{
-    private readonly BulkBuySubSettings _p;
-    public BbTimingDelaysSubMenu(BulkBuySubSettings p) { _p = p; }
-    
-    [Menu("Timing Preset", "Choose preset: Slow (slow PC/load times), Fast (normal), SuperFast (fast PC/load times)")]
-    public ListNode TimingPreset => _p.TimingPreset;
-    
-    [Menu("Timeout Per Item (seconds)", "Max time to wait for purchase window to open before skipping item")] 
-    public RangeNode<int> TimeoutPerItem => _p.TimeoutPerItem;
-    [Menu("Mouse Move Delay (ms)", "Delay after moving mouse before clicking (allows tooltip to appear). Default: 100ms")] 
-    public RangeNode<int> MouseMoveDelay => _p.MouseMoveDelay;
-    [Menu("Post-Click Delay (ms)", "Delay after clicking before checking if purchase succeeded. Default: 250ms")] 
-    public RangeNode<int> PostClickDelay => _p.PostClickDelay;
-    [Menu("Hideout Token Delay (ms)", "Delay after sending hideout token for tab switch. Default: 200ms")] 
-    public RangeNode<int> HideoutTokenDelay => _p.HideoutTokenDelay;
-    [Menu("Window Close Check Interval (ms)", "How often to check if old purchase window closed. Default: 100ms")] 
-    public RangeNode<int> WindowCloseCheckInterval => _p.WindowCloseCheckInterval;
-    [Menu("Loading Screen Check Interval (ms)", "How often to check if loading screen finished. Default: 200ms")] 
-    public RangeNode<int> LoadingCheckInterval => _p.LoadingCheckInterval;
-    [Menu("Retry Delay (ms)", "Delay between retry attempts when purchase fails. Default: 500ms")] 
-    public RangeNode<int> RetryDelay => _p.RetryDelay;
-}
-
-public class BbSafetySubMenu
-{
-    private readonly BulkBuySubSettings _p;
-    public BbSafetySubMenu(BulkBuySubSettings p) { _p = p; }
-    [Menu("Auto-Resume After Rate Limit")] public ToggleNode AutoResumeAfterRateLimit => _p.AutoResumeAfterRateLimit;
-    [Menu("Stop on Error")] public ToggleNode StopOnError => _p.StopOnError;
-    [Menu("Retry Failed Items")] public ToggleNode RetryFailedItems => _p.RetryFailedItems;
-    [Menu("Max Retries Per Item")] public RangeNode<int> MaxRetriesPerItem => _p.MaxRetriesPerItem;
-    [Menu("Stop After Failed Items", "Stop bulk buying after this many failed items (0 = disabled)")] 
-    public RangeNode<int> StopAfterFailedItems => _p.StopAfterFailedItems;
-}
-
-public class BbLoggingSubMenu
-{
-    private readonly BulkBuySubSettings _p;
-    public BbLoggingSubMenu(BulkBuySubSettings p) { _p = p; }
-    [Menu("Log Purchases to File")] public ToggleNode LogPurchasesToFile => _p.LogPurchasesToFile;
-    [Menu("Play Sound on Complete")] public ToggleNode PlaySoundOnComplete => _p.PlaySoundOnComplete;
-    [Menu("Show Notifications")] public ToggleNode ShowNotifications => _p.ShowNotifications;
 }
 
 // ==================== BULKBUY GROUP & SEARCH CLASSES ====================
@@ -1269,98 +917,14 @@ public class BulkBuyGroupsRenderer
 [Submenu(CollapsedByDefault = true)]
 public class CurrencyExchangeSubSettings
 {
-    public CurrencyExchangeSubSettings()
-    {
-        General = new CeGeneralSubMenu(this);
-        PricingStrategy = new CePricingStrategySubMenu(this);
-        AutoFill = new CeAutoFillSubMenu(this);
-    }
-
     // ===== MAIN SETTINGS =====
     [Menu("Enable Currency Exchange", "Enable or disable the Currency Exchange sub-plugin")]
     public ToggleNode Enable { get; set; } = new ToggleNode(false);
 
-    [Menu("Debug Mode", "Enable detailed logging for debugging")]
-    [IgnoreMenu]
-    public ToggleNode DebugMode { get; set; } = new ToggleNode(false);
-
-    [Menu("Show Button", "Display the auto-fill button above input field")]
-    [IgnoreMenu]
-    public ToggleNode ShowButton { get; set; } = new ToggleNode(true);
-
-    // ===== PRICING STRATEGY =====
-    [Menu("Auto Undercut", "Automatically undercut the lowest maker order")]
-    [IgnoreMenu]
+    [Menu("Auto Undercut", "Undercut the lowest maker order when filling in a ratio")]
     public ToggleNode AutoUndercut { get; set; } = new ToggleNode(true);
 
-    [Menu("Undercut Amount", "Amount to undercut by (e.g., 0.01 for 1/100 ratio)")]
-    [IgnoreMenu]
-    public RangeNode<float> UndercutAmount { get; set; } = new RangeNode<float>(0.01f, 0.001f, 0.1f);
-
-
-    // ===== AUTO FILL SETTINGS =====
-    [Menu("Fill Offered Amount", "Automatically fill the 'I Have' amount with total inventory stock")]
-    [IgnoreMenu]
-    public ToggleNode FillOfferedAmount { get; set; } = new ToggleNode(true);
-
-    [Menu("Fill Wanted Amount", "Automatically calculate the 'I Want' amount based on best ratio")]
-    [IgnoreMenu]
-    public ToggleNode FillWantedAmount { get; set; } = new ToggleNode(true);
-
-    [Menu("Auto Click Place Order", "Automatically click 'Place Order' button after filling")]
-    [IgnoreMenu]
+    [Menu("Auto Click Place Order", "Automatically click 'Place Order' after filling the form in")]
     public ToggleNode AutoClickPlaceOrder { get; set; } = new ToggleNode(false);
-
-    // ===== ACTION TIMING =====
-    [Menu("Action Delay (ms)", "Delay between actions to simulate human behavior")]
-    [IgnoreMenu]
-    public RangeNode<int> ActionDelay { get; set; } = new RangeNode<int>(75, 10, 500);
-
-    [Menu("Random Delay (ms)", "Random delay added to action delay")]
-    [IgnoreMenu]
-    public RangeNode<int> RandomDelay { get; set; } = new RangeNode<int>(25, 0, 100);
-
-    // ===== INVENTORY SCANNING =====
-    [Menu("Include Stash Tabs", "Include stash tabs when counting inventory")]
-    [IgnoreMenu]
-    public ToggleNode IncludeStashTabs { get; set; } = new ToggleNode(true);
-
-    [Menu("Include Currency Tab", "Include currency stash tab")]
-    [IgnoreMenu]
-    public ToggleNode IncludeCurrencyTab { get; set; } = new ToggleNode(true);
-
-    // Grouped submenu properties
-    [Submenu(CollapsedByDefault = true)] public CeGeneralSubMenu General { get; set; }
-    [Submenu(CollapsedByDefault = true)] public CePricingStrategySubMenu PricingStrategy { get; set; }
-    [Submenu(CollapsedByDefault = true)] public CeAutoFillSubMenu AutoFill { get; set; }
 }
 
-// ===== CURRENCY EXCHANGE SUBMENU CLASSES =====
-public class CeGeneralSubMenu
-{
-    private readonly CurrencyExchangeSubSettings _p;
-    public CeGeneralSubMenu(CurrencyExchangeSubSettings p) { _p = p; }
-    [Menu("Debug Mode")] public ToggleNode DebugMode => _p.DebugMode;
-    [Menu("Show Button")] public ToggleNode ShowButton => _p.ShowButton;
-}
-
-public class CePricingStrategySubMenu
-{
-    private readonly CurrencyExchangeSubSettings _p;
-    public CePricingStrategySubMenu(CurrencyExchangeSubSettings p) { _p = p; }
-    [Menu("Auto Undercut")] public ToggleNode AutoUndercut => _p.AutoUndercut;
-    [Menu("Undercut Amount")] public RangeNode<float> UndercutAmount => _p.UndercutAmount;
-}
-
-public class CeAutoFillSubMenu
-{
-    private readonly CurrencyExchangeSubSettings _p;
-    public CeAutoFillSubMenu(CurrencyExchangeSubSettings p) { _p = p; }
-    [Menu("Fill Offered Amount")] public ToggleNode FillOfferedAmount => _p.FillOfferedAmount;
-    [Menu("Fill Wanted Amount")] public ToggleNode FillWantedAmount => _p.FillWantedAmount;
-    [Menu("Auto Click Place Order")] public ToggleNode AutoClickPlaceOrder => _p.AutoClickPlaceOrder;
-    [Menu("Action Delay (ms)")] public RangeNode<int> ActionDelay => _p.ActionDelay;
-    [Menu("Random Delay (ms)")] public RangeNode<int> RandomDelay => _p.RandomDelay;
-    [Menu("Include Stash Tabs")] public ToggleNode IncludeStashTabs => _p.IncludeStashTabs;
-    [Menu("Include Currency Tab")] public ToggleNode IncludeCurrencyTab => _p.IncludeCurrencyTab;
-}

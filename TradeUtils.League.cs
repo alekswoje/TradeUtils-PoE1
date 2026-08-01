@@ -29,6 +29,21 @@ public partial class TradeUtils
     /// </summary>
     internal string ResolveLeague()
     {
+        return ResolveLeagueOrNull() ?? "Standard";
+    }
+
+    /// <summary>
+    /// Same resolution as <see cref="ResolveLeague"/>, but returns null instead of guessing
+    /// "Standard" when the league genuinely isn't known yet.
+    ///
+    /// The difference matters. A read-only query sent to the wrong league just fails, but anything
+    /// that *prices* against the wrong league is silently wrong: poe.ninja happily answers for
+    /// Standard, where a Divine is ~829c instead of ~174c, and repricing off that number relists
+    /// real items at roughly five times their intended price. Callers that write must use this and
+    /// refuse to act on null.
+    /// </summary>
+    internal string ResolveLeagueOrNull()
+    {
         try
         {
             var live = GameController?.IngameState?.ServerData?.League;
@@ -51,10 +66,11 @@ public partial class TradeUtils
         if (!string.IsNullOrWhiteSpace(cached))
             return cached;
 
-        // Nothing cached yet: kick off a one-time background fetch so a later call resolves it,
-        // and return a safe default for now.
+        // Nothing cached yet: kick off a one-time background fetch so a later call resolves it.
+        // In practice this is the path that runs, because ServerData.League reads empty even while
+        // fully in-world, so the API is what actually resolves the league.
         _ = EnsureApiLeagueAsync();
-        return "Standard";
+        return null;
     }
 
     /// <summary>

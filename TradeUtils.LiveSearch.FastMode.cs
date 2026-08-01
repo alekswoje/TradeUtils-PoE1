@@ -140,7 +140,7 @@ public partial class TradeUtils
         }
         else
         {
-            fastModeEnabled = Settings.LiveSearch.FastMode.FastMode.Value;
+            fastModeEnabled = Settings.LiveSearch.AutoFeatures.FastMode.Value;
         }
         
         if (!fastModeEnabled)

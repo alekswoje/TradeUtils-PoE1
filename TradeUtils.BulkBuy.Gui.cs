@@ -215,12 +215,12 @@ public partial class TradeUtils
                     ImGui.Indent();
 
                     // POESESSID (masked)
-                    string session = Settings.BulkBuy.SessionId?.Value ?? string.Empty;
+                    string session = Settings.LiveSearch.SessionId?.Value ?? string.Empty;
                     if (ImGui.InputText("POESESSID (BulkBuy)", ref session, 128, ImGuiInputTextFlags.Password))
                     {
-                        if (Settings.BulkBuy.SessionId == null)
-                            Settings.BulkBuy.SessionId = new TextNode(string.Empty);
-                        Settings.BulkBuy.SessionId.Value = session;
+                        if (Settings.LiveSearch.SessionId == null)
+                            Settings.LiveSearch.SessionId = new TextNode(string.Empty);
+                        Settings.LiveSearch.SessionId.Value = session;
                     }
 
                     ImGui.Spacing();
@@ -302,51 +302,12 @@ public partial class TradeUtils
 
                     ImGui.Spacing();
 
-                    // Safety options
-                    bool autoResume = Settings.BulkBuy.AutoResumeAfterRateLimit.Value;
-                    if (ImGui.Checkbox("Auto-Resume After Rate Limit##AutoResume", ref autoResume))
-                    {
-                        Settings.BulkBuy.AutoResumeAfterRateLimit.Value = autoResume;
-                    }
-
+                    // Auto-resume, retries, file logging and the completion sound are all fixed
+                    // behaviour now, so Stop on Error is the only choice left worth surfacing.
                     bool stopOnError = Settings.BulkBuy.StopOnError.Value;
                     if (ImGui.Checkbox("Stop on Error##StopOnError", ref stopOnError))
                     {
                         Settings.BulkBuy.StopOnError.Value = stopOnError;
-                    }
-
-                    bool retry = Settings.BulkBuy.RetryFailedItems.Value;
-                    if (ImGui.Checkbox("Retry Failed Items##Retry", ref retry))
-                    {
-                        Settings.BulkBuy.RetryFailedItems.Value = retry;
-                    }
-
-                    if (Settings.BulkBuy.RetryFailedItems.Value)
-                    {
-                        int maxRetries = Settings.BulkBuy.MaxRetriesPerItem.Value;
-                        if (ImGui.SliderInt("Max Retries##MaxRetries", ref maxRetries, 0, 5))
-                        {
-                            Settings.BulkBuy.MaxRetriesPerItem.Value = maxRetries;
-                        }
-                    }
-
-                    ImGui.Spacing();
-
-                    // Logging options
-                    bool logToFile = Settings.BulkBuy.LogPurchasesToFile.Value;
-                    if (ImGui.Checkbox("Log to File##LogToFile", ref logToFile))
-                    {
-                        Settings.BulkBuy.LogPurchasesToFile.Value = logToFile;
-                    }
-                    if (ImGui.IsItemHovered())
-                    {
-                        ImGui.SetTooltip("Save purchase log to CSV file");
-                    }
-
-                    bool playSound = Settings.BulkBuy.PlaySoundOnComplete.Value;
-                    if (ImGui.Checkbox("Sound on Complete##PlaySound", ref playSound))
-                    {
-                        Settings.BulkBuy.PlaySoundOnComplete.Value = playSound;
                     }
 
                     ImGui.Unindent();
@@ -371,7 +332,7 @@ public partial class TradeUtils
                         if (_bulkBuyRetryCount > 0)
                         {
                             ImGui.TextColored(new Vector4(1.0f, 0.7f, 0.0f, 1.0f), 
-                                $"Retry: {_bulkBuyRetryCount}/{Settings.BulkBuy.MaxRetriesPerItem.Value}");
+                                $"Retry: {_bulkBuyRetryCount}/{MaxRetriesPerItem}");
                         }
                         
                         ImGui.Unindent();
@@ -405,7 +366,7 @@ public partial class TradeUtils
                 }
 
                 // Debug info
-                if (Settings.BulkBuy.DebugMode.Value)
+                if (Settings.LiveSearch.General.DebugMode.Value)
                 {
                     ImGui.Spacing();
                     ImGui.Separator();
