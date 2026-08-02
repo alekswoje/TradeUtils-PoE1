@@ -74,6 +74,13 @@ public partial class TradeUtils
     private WaveOutEvent _lowerPriceWaveOut;
     private bool _lowerPriceManualRepriceTriggered = false;
     private int _lowerPriceRunning; // 0 = idle, 1 = a reprice run is in flight
+
+    // Items a run left alone because a step down was due and couldn't be made. Plugin log messages
+    // never reach the log files, so without these the run looks like it worked - which is exactly
+    // how a disabled step down went unnoticed for three releases. Accumulated across an all-tabs
+    // sweep, reset when a run starts, and rendered on the value display.
+    private volatile int _lowerPriceRunStepDownBlocked;
+    private volatile string _lowerPriceRunStepDownReason;
     private bool _lowerPriceWasStashVisible = false;
     private int _lowerPriceButtonRenderCount = 0;
     private bool _lowerPriceImageLoaded = false;
@@ -353,6 +360,11 @@ public partial class TradeUtils
                                     await Task.Delay(10);
                                 }
 
+                                // Fresh counters per run, so the overlay reports this pass rather
+                                // than something left over from the last one.
+                                _lowerPriceRunStepDownBlocked = 0;
+                                _lowerPriceRunStepDownReason = null;
+
                                 if (valueScan)
                                     await ScanAllLowerPriceShopTabValues();
                                 else if (sweepAllTabs)
@@ -480,6 +492,8 @@ public partial class TradeUtils
             bool stepDownVerificationFailed = false;
             bool chatWasOpen = false;
             int unverifiedStepDowns = 0;
+            int stepDownUnavailable = 0;
+            string stepDownBlockedReason = null;
 
             // The dropdown row order can't change part-way through a run, so the first step down is
             // the only one worth checking. Checked, not proven - if the tooltip couldn't be read the
@@ -591,6 +605,20 @@ public partial class TradeUtils
                                                 {
                                                     string orbType = priceChild1.Children.Count > 2 ? priceChild1.Children[2].Text : null;
                                                     LogMessage($"LowerPrice DEBUG: Item {processedCount} - OldPrice = {oldPrice}, OrbType = '{orbType}'");
+
+                                                    // A garbled read across a panel rebuild produces
+                                                    // arbitrary bytes, not a failure. Repricing off
+                                                    // one means acting on an item whose currency we
+                                                    // don't actually know - and it would also make
+                                                    // step down refuse, since no rate can match.
+                                                    if (!IsPlausibleLowerPriceOrbName(orbType))
+                                                    {
+                                                        LogMessage($"LowerPrice DEBUG: Item {processedCount} - unreadable currency, skipping.");
+                                                        skippedNoPrice++;
+                                                        continue;
+                                                    }
+
+                                                    orbType = orbType.Trim();
                                                     // Everything priced in a currency we can read is repriced, except that
                                                     // Divine and Mirror listings each keep an opt-out — those are the ones
                                                     // where an automated mistake is worth the most.
@@ -617,7 +645,8 @@ public partial class TradeUtils
                                                     if (LowerPriceSettings.StepDownCurrency.Value &&
                                                         oldPrice <= LowerPriceSettings.StepDownAtOrBelow.Value)
                                                     {
-                                                        var stepPrice = CalculateLowerPriceStepDown(oldPrice, orbType, out var targetOrb, out var stepBlockedBy);
+                                                        var stepPrice = CalculateLowerPriceStepDown(oldPrice, orbType, out var targetOrb,
+                                                                                                    out var stepBlockedBy, out var stepRefusal);
                                                         if (stepPrice > 0)
                                                         {
                                                             LogMessage($"LowerPrice DEBUG: Item {processedCount} - Stepping down {oldPrice}x {orbType} to {stepPrice}x {targetOrb}");
@@ -675,6 +704,17 @@ public partial class TradeUtils
 
                                                             // The listing is untouched, so the normal path below is still safe to run.
                                                             LogError($"LowerPrice: step down to {targetOrb} didn't go through for item {processedCount}; leaving it priced in {orbType}.");
+                                                        }
+                                                        else if (stepRefusal == LowerPriceStepDownRefusal.Unavailable)
+                                                        {
+                                                            // The listing is down where a cut in its own currency is enormous — 3 Divine
+                                                            // to 2 is 33% — which is the exact situation step down exists to avoid. If
+                                                            // the step can't be made, quietly taking that cut instead is worse than
+                                                            // doing nothing, so leave the listing alone and report why on the overlay.
+                                                            LogError($"LowerPrice: item {processedCount} ({oldPrice}x {orbType}) should have stepped down but couldn't: {stepBlockedBy}");
+                                                            stepDownUnavailable++;
+                                                            stepDownBlockedReason ??= stepBlockedBy;
+                                                            continue;
                                                         }
                                                         else
                                                         {
@@ -814,6 +854,16 @@ public partial class TradeUtils
             LogMessage($"LowerPrice DEBUG: Items repriced: {repriced}");
             LogMessage($"LowerPrice DEBUG: Items stepped down a currency: {steppedDown}");
             LogMessage($"LowerPrice DEBUG: Items picked up: {pickedUp}");
+
+            // Hand the blocked count to the overlay. Added rather than assigned: an all-tabs sweep
+            // calls this once per tab, and the total across the sweep is what matters.
+            if (stepDownUnavailable > 0)
+            {
+                _lowerPriceRunStepDownBlocked += stepDownUnavailable;
+                _lowerPriceRunStepDownReason ??= stepDownBlockedReason;
+                LogError($"LowerPrice: {stepDownUnavailable} item(s) left untouched - step down was due but " +
+                         $"unavailable: {stepDownBlockedReason}");
+            }
 
             if (unverifiedStepDowns > 0)
                 LogMessage("LowerPrice: couldn't read the first step down back off the item's tooltip, so this " +
@@ -958,9 +1008,60 @@ public partial class TradeUtils
         if (!await WaitForLowerPriceCondition(() => CurrentLowerPriceShopTab(grids) == index, 3000))
             return false;
 
-        return await WaitForLowerPriceCondition(
-            () => GameController?.IngameState?.IngameUi?.OfflineMerchantPanel?.VisibleStash?.VisibleInventoryItems != null,
-            3000);
+        // Waiting for the list to be non-null was not enough: it comes back non-null but EMPTY for
+        // a moment after the container flips, so a caller reading right here saw zero items and
+        // moved on, silently dropping a whole tab. Wait for a count that is actually populated and
+        // holding steady instead.
+        await WaitForLowerPriceTabItems();
+        return true;
+    }
+
+    /// <summary>
+    /// Waits for the freshly-selected tab's item list to settle, and returns the count it settled
+    /// on. The container flipping to the new tab and the panel reporting that tab's items are two
+    /// different moments; reading in between gives an empty list that looks exactly like an empty
+    /// tab.
+    ///
+    /// A populated tab returns the moment its count holds steady, so it costs a settle window and
+    /// nothing more. An empty tab has nothing to wait for and can only be timed out on, so it gets
+    /// its own much shorter budget - the full timeout is reserved for a list that is still visibly
+    /// changing. Paying seconds per empty tab across two dozen of them is worse than the bug this
+    /// was added to fix.
+    /// </summary>
+    private async Task<int> WaitForLowerPriceTabItems(int settleMs = 40, int emptyTimeoutMs = 350,
+                                                      int timeoutMs = 1500)
+    {
+        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+        var lastCount = -1;
+        var steadySince = 0L;
+
+        while (stopwatch.ElapsedMilliseconds < timeoutMs)
+        {
+            var count = CurrentLowerPriceTabItems()?.Count ?? 0;
+
+            if (count != lastCount)
+            {
+                // Still filling in - restart the settle window.
+                lastCount = count;
+                steadySince = stopwatch.ElapsedMilliseconds;
+            }
+            else if (count > 0 && stopwatch.ElapsedMilliseconds - steadySince >= settleMs)
+            {
+                return count;
+            }
+            else if (count == 0 && stopwatch.ElapsedMilliseconds >= emptyTimeoutMs)
+            {
+                // Nothing has appeared and nothing is changing. Waiting longer only helps if the
+                // panel is unusually slow, and that costs every empty tab in the shop.
+                return 0;
+            }
+
+            await Task.Delay(LowerPriceUiPollMs);
+        }
+
+        // Zero here means the tab really does look empty. It can't be distinguished from a tab that
+        // never loaded, which is why callers report the count rather than treating it as fact.
+        return lastCount < 0 ? 0 : lastCount;
     }
 
     /// <summary>
@@ -1056,6 +1157,7 @@ public partial class TradeUtils
         public int UnpricedItems;
         public int MissedItems;     // hovered but never produced a price
         public int UnstableTabs;    // rebuilt under us repeatedly; totals may be short
+        public int EmptyTabs;       // reported no items at all, even after waiting for them
         public decimal ChaosTotal;
         public string RatesLeague;
         public Dictionary<string, decimal> OrbTotals = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
@@ -1123,9 +1225,14 @@ public partial class TradeUtils
 
         for (var attempt = 1; attempt <= maxAttempts; attempt++)
         {
+            // No re-wait here: SelectLowerPriceShopTab has already settled this tab's list, and
+            // waiting a second time doubled the cost of every empty tab for nothing. On a retry pass
+            // the tab is long since loaded, so a zero now is real.
             var startCount = CurrentLowerPriceTabItems()?.Count ?? 0;
             if (startCount == 0)
             {
+                scan.EmptyTabs++;
+                LogMessage($"LowerPrice: '{tabName}' reported no items after waiting for them.");
                 scan.PerTab.Add(new KeyValuePair<string, decimal>(tabName, 0m));
                 return true;
             }
@@ -1341,6 +1448,11 @@ public partial class TradeUtils
         if (scan.UnstableTabs > 0)
             text += $"\n⚠️ {scan.UnstableTabs} tab(s) kept changing mid-scan - may be short";
 
+        // Stated rather than assumed: some shops genuinely have empty tabs, but this is also what a
+        // tab that never finished loading looks like, and the two are indistinguishable from here.
+        if (scan.EmptyTabs > 0)
+            text += $"\n({scan.EmptyTabs} tab(s) had no items)";
+
         if (scan.Cancelled)
             text += "\n⚠️ scan was cancelled - totals are partial";
 
@@ -1417,17 +1529,33 @@ public partial class TradeUtils
             .FirstOrDefault();
     }
 
+    /// <summary>Why a step down didn't produce a price. The distinction drives what happens next.</summary>
+    private enum LowerPriceStepDownRefusal
+    {
+        /// <summary>A step down is available.</summary>
+        None,
+
+        /// <summary>Nothing is wrong — the listing is already in the cheapest ladder currency.</summary>
+        AlreadyCheapest,
+
+        /// <summary>The step down should have happened and couldn't: rates, league, or the cap.</summary>
+        Unavailable,
+    }
+
     /// <summary>
     /// Works out the replacement listing when <paramref name="oldPrice"/>x <paramref name="orbType"/>
     /// is too low to keep cutting in its own currency: the equivalent amount of the next cheaper
     /// currency, with that currency's normal reduction already applied. 1 Divine at 200c comes out
     /// as 180 Chaos under a 0.9 ratio. Returns 0 when the step shouldn't happen, with
-    /// <paramref name="reason"/> saying why.
+    /// <paramref name="reason"/> saying why and <paramref name="refusal"/> saying whether that's
+    /// routine or a failure the caller has to react to.
     /// </summary>
-    private int CalculateLowerPriceStepDown(int oldPrice, string orbType, out string targetOrb, out string reason)
+    private int CalculateLowerPriceStepDown(int oldPrice, string orbType, out string targetOrb,
+                                            out string reason, out LowerPriceStepDownRefusal refusal)
     {
         targetOrb = null;
         reason = null;
+        refusal = LowerPriceStepDownRefusal.Unavailable;
 
         if (string.IsNullOrWhiteSpace(orbType))
         {
@@ -1437,11 +1565,15 @@ public partial class TradeUtils
 
         orbType = orbType.Trim();
 
-        // Rates drive the whole conversion, so a table that never loaded — or one left over from
-        // hours ago — would misprice a real listing. Refuse rather than guess.
-        if (!IsLowerPriceRateTableFresh(out var staleReason))
+        // The bottom of the ladder is settled without consulting the rate table at all, so a Chaos
+        // listing still reduces normally when poe.ninja is unreachable. The table starts empty, and
+        // without this every lookup below would return 0 and report a blocked step down for items
+        // that were never going to step anywhere.
+        if (string.Equals(orbType, LowerPriceCurrencyLadder[LowerPriceCurrencyLadder.Length - 1],
+                          StringComparison.OrdinalIgnoreCase))
         {
-            reason = staleReason;
+            refusal = LowerPriceStepDownRefusal.AlreadyCheapest;
+            reason = $"'{orbType}' is the cheapest rung on the ladder";
             return 0;
         }
 
@@ -1452,9 +1584,17 @@ public partial class TradeUtils
             return 0;
         }
 
+        // Which rung the listing sits on is settled before the league gate below, because the
+        // ladder's ORDER is the same in every league — a Mirror outprices a Divine outprices a
+        // Chaos wherever you play. Only the conversion needs the right league's numbers. Deciding
+        // this first is what stops an unconfirmed league from making Chaos listings, which have
+        // nowhere cheaper to go and were never stepping down, look like blocked step downs.
         targetOrb = GetNextCheaperLowerPriceCurrency(orbType);
         if (targetOrb == null)
         {
+            // Routine, not a failure: a Chaos listing should just take its normal reduction. Every
+            // other refusal here means the step down was meant to fire and didn't.
+            refusal = LowerPriceStepDownRefusal.AlreadyCheapest;
             reason = $"'{orbType}' is already the cheapest rung on the ladder";
             return 0;
         }
@@ -1463,6 +1603,15 @@ public partial class TradeUtils
         if (targetChaos <= 0)
         {
             reason = $"there is no poe.ninja chaos rate for '{targetOrb}'";
+            return 0;
+        }
+
+        // Rates drive the whole conversion, so a table that never loaded — or one left over from
+        // hours ago, or belonging to another league — would misprice a real listing. Refuse rather
+        // than guess: Standard puts a Divine near 829c against roughly 174c in the challenge league.
+        if (!IsLowerPriceRateTableFresh(out var staleReason))
+        {
+            reason = staleReason;
             return 0;
         }
 
@@ -1493,6 +1642,7 @@ public partial class TradeUtils
             return 0;
         }
 
+        refusal = LowerPriceStepDownRefusal.None;
         return newPrice;
     }
 
@@ -1516,7 +1666,7 @@ public partial class TradeUtils
         var league = ResolveLeagueOrNull();
         if (league == null)
         {
-            reason = "the current league hasn't been resolved yet";
+            reason = $"the league isn't confirmed ({LeagueUnresolvedReason()})";
             return false;
         }
 
@@ -1973,12 +2123,49 @@ public partial class TradeUtils
             if (!int.TryParse(priceText.Replace("x", "").Replace(",", "").Trim(), out price)) return false;
 
             orbType = priceGroup.Children[2]?.Text;
-            return !string.IsNullOrWhiteSpace(orbType);
+            if (!IsPlausibleLowerPriceOrbName(orbType))
+            {
+                orbType = null;
+                return false;
+            }
+
+            orbType = orbType.Trim();
+            return true;
         }
         catch
         {
             return false;
         }
+    }
+
+    /// <summary>
+    /// Whether <paramref name="orbType"/> reads like a currency name rather than a garbled memory
+    /// read.
+    ///
+    /// The merchant panel rebuilds its item list constantly, and a tooltip read across a rebuild
+    /// hands back arbitrary bytes rather than failing. Those arrived as orb names made of
+    /// unrenderable glyphs, showed up on the value display as "???: 68", and were then quietly
+    /// dropped from the totals as "an unpriced currency" - so a wrong number looked like a correct
+    /// one. Every real orb name is a plain ASCII word or two, so anything else is a failed read to
+    /// retry, not an exotic currency to count.
+    /// </summary>
+    private static bool IsPlausibleLowerPriceOrbName(string orbType)
+    {
+        if (string.IsNullOrWhiteSpace(orbType)) return false;
+
+        var name = orbType.Trim();
+        if (name.Length < 3 || name.Length > 40) return false;
+
+        var letters = 0;
+        foreach (var c in name)
+        {
+            if (c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z') { letters++; continue; }
+            // Apostrophes and hyphens show up in names like "Gemcutter's Prism"; nothing else does.
+            if (c == ' ' || c == '\'' || c == '-') continue;
+            return false;
+        }
+
+        return letters >= 3;
     }
 
     /// <summary>Left-clicks the centre of a UI rect, which the client reports window-relative.</summary>
@@ -2478,7 +2665,8 @@ public partial class TradeUtils
                 displayText += $"\nTotal in Chaos: {scanned.ChaosTotal:N0}\n";
                 displayText += divineInChaos > 0
                     ? $"Total in Divine: {scanned.ChaosTotal / divineInChaos:F2}"
-                    : "Total in Divine: rates unavailable" + LowerPriceRatesLeagueLabel();
+                    : "Total in Divine: rates unavailable";
+                displayText += LowerPriceRatesLeagueLabel();
 
                 if (scanned.UnpricedItems > 0)
                     displayText += $"\n({scanned.UnpricedItems} item(s) in an unpriced currency)";
@@ -2501,7 +2689,8 @@ public partial class TradeUtils
                 displayText += $"\nTotal in Chaos: {itemValues.TotalInChaos:N0}\n";
                 displayText += itemValues.DivineRateKnown
                     ? $"Total in Divine: {itemValues.TotalInDivine:F2}"
-                    : "Total in Divine: rates unavailable" + LowerPriceRatesLeagueLabel();
+                    : "Total in Divine: rates unavailable";
+                displayText += LowerPriceRatesLeagueLabel();
 
                 if (itemValues.UnpricedItems > 0)
                     displayText += $"\n({itemValues.UnpricedItems} item(s) in an unpriced currency)";
@@ -2512,6 +2701,15 @@ public partial class TradeUtils
                     displayText += $"\n⚠️ Not scanned — hover items, or press " +
                                    $"{LowerPriceSettings.StashScanHotkey.Value} to scan all tabs.";
                 }
+            }
+
+            // Items the last run deliberately didn't touch. Loudest line on the display, because a
+            // run that skipped half the tab otherwise looks identical to one that worked.
+            var blocked = _lowerPriceRunStepDownBlocked;
+            if (blocked > 0)
+            {
+                displayText += $"\n\n⚠️ {blocked} item(s) NOT repriced — step down was due but" +
+                               $"\n   couldn't be made: {_lowerPriceRunStepDownReason}";
             }
 
             // Totals from the last full-shop scan, under the current tab's figures.
@@ -2674,8 +2872,16 @@ public partial class TradeUtils
 
         var actual = ResolveLeagueOrNull();
         if (actual == null)
-            return $"\n⚠️ rates: {rateLeague} — league UNCONFIRMED, step down disabled" +
-                   "\n   set League Override in settings to fix";
+        {
+            var label = $"\n⚠️ rates: {rateLeague} — league UNCONFIRMED, step down disabled" +
+                        $"\n   {LeagueUnresolvedReason()}";
+
+            // Spelling has to match exactly, so show what's accepted rather than making it a guess.
+            var known = KnownLeagueNames();
+            if (known != null) label += $"\n   valid names: {known}";
+
+            return label;
+        }
 
         if (!string.Equals(actual, rateLeague, StringComparison.OrdinalIgnoreCase))
             return $"\n⚠️ rates are {rateLeague} but you're in {actual} — step down disabled";

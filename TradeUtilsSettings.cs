@@ -26,11 +26,13 @@ public class TradeUtilsSettings : ISettings
     [Menu("Auto-Detect League", "Use the league your character is currently in for trade searches and currency rates. Leave this ON so searches keep working after every league launch (fixes the 'Invalid query' error from the old hardcoded league). Turn OFF only if you want to force a manually-set league per search.")]
     public ToggleNode AutoDetectLeague { get; set; } = new ToggleNode(true);
 
-    // The client does not expose the league in memory (ServerData.League reads empty even in-world),
-    // so auto-detection has to ask GGG which league the character is in, which needs a working
-    // POESESSID. When that can't answer, repricing refuses rather than guess - and without this
-    // field there was no way to tell it otherwise.
-    [Menu("League Override", "Leave empty to auto-detect. Type a league name (e.g. Standard) if the value display says the league is unconfirmed, or if repricing has stopped working. This is treated as the real answer, so make sure it matches the character you're playing.")]
+    // The client does not expose the league in memory - ServerData.League reads empty even in-world,
+    // and the string appears nowhere else under IngameState - so auto-detection has to ask GGG which
+    // league the character is in, and that call is authenticated. This field is the way out that
+    // needs no POESESSID at all: it is taken as the truth, because the user knows where they're
+    // playing. Repricing refuses on an unknown league rather than guess, so with no session and no
+    // override, step down never runs.
+    [Menu("League Override", "Type your league name here (e.g. Allflame, Standard) - this alone makes repricing work and needs no POESESSID. Leave empty only if you have a POESESSID set, which lets the league be detected automatically. The value display lists the accepted names when it can't confirm your league. Must match the character you're playing.")]
     public TextNode LeagueOverride { get; set; } = new TextNode("");
 
     // One delay for every sub-plugin that drives the UI, rather than a separate pair each. A random

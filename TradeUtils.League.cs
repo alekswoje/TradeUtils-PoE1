@@ -20,6 +20,11 @@ public partial class TradeUtils
     private volatile string _apiLeague;
     private int _apiLeagueFetching; // 0 = idle, 1 = a fetch is in flight
 
+    // Every pc league the trade API knows about, from the same unauthenticated call. Not a source
+    // of truth for which league you're IN — that's the whole problem — but it's exactly the list of
+    // valid things to type into League Override, which saves guessing at the spelling.
+    private volatile string[] _apiLeagues;
+
     // The league of the character actually being played, from GGG's character list. This is the
     // only authoritative answer available: ServerData.League reads empty even while fully in-world,
     // and the trade API's first entry is the current CHALLENGE league — which is simply wrong when
@@ -130,6 +135,37 @@ public partial class TradeUtils
 
         _ = EnsureCharacterLeagueAsync(character);
         return null;
+    }
+
+    /// <summary>
+    /// Why <see cref="ResolveLeagueOrNull"/> is coming back null, phrased as something to do about
+    /// it. Repricing refuses without an authoritative league, and the log messages explaining that
+    /// never reach the log files — so this is what gets shown on the value display instead.
+    /// </summary>
+    internal string LeagueUnresolvedReason()
+    {
+        if (CurrentCharacterName() == null)
+            return "no character is loaded yet";
+
+        // Setting the override is always the fix and never needs a session — it just isn't
+        // automatic. The auto path needs one because the client doesn't put the league anywhere
+        // readable (ServerData.League is empty even in-world, verified), so the only thing that can
+        // say which league a character is in is GGG's own character list, which is authenticated.
+        return "set League Override" +
+               (string.IsNullOrWhiteSpace(EncryptedSettings.GetSecureSessionId())
+                   ? " (or add a POESESSID to auto-detect)"
+                   : " — GGG's character list hasn't answered");
+    }
+
+    /// <summary>
+    /// The league names League Override will accept, or null before the list has been fetched.
+    /// Kept apart from <see cref="LeagueUnresolvedReason"/> because that one has to stay short
+    /// enough to sit inline in a one-line run summary.
+    /// </summary>
+    internal string KnownLeagueNames()
+    {
+        var known = _apiLeagues;
+        return known == null || known.Length == 0 ? null : string.Join(", ", known);
     }
 
     /// <summary>
@@ -250,7 +286,9 @@ public partial class TradeUtils
                     if (result == null)
                         return;
 
-                    // The first pc-realm entry is the current main (softcore) challenge league.
+                    // The first pc-realm entry is the current main (softcore) challenge league. The
+                    // rest are kept only to show the user what League Override will accept.
+                    var names = new System.Collections.Generic.List<string>();
                     foreach (var entry in result)
                     {
                         var realm = (string)entry["realm"];
@@ -259,11 +297,14 @@ public partial class TradeUtils
 
                         var id = (string)entry["id"];
                         if (!string.IsNullOrWhiteSpace(id))
-                        {
-                            _apiLeague = id.Trim();
-                            LogMessage($"League auto-detect: current league resolved to '{_apiLeague}' from GGG trade API.");
-                            return;
-                        }
+                            names.Add(id.Trim());
+                    }
+
+                    if (names.Count > 0)
+                    {
+                        _apiLeagues = names.ToArray();
+                        _apiLeague = names[0];
+                        LogMessage($"League auto-detect: current league resolved to '{_apiLeague}' from GGG trade API.");
                     }
                 }
             }
