@@ -3,6 +3,7 @@ using System.Net.Http;
 using System.Threading;
 using System.Threading.Tasks;
 using Newtonsoft.Json.Linq;
+using TradeUtils.Utility;
 
 namespace TradeUtils;
 
@@ -19,6 +20,31 @@ public partial class TradeUtils
     private volatile string _apiLeague;
     private int _apiLeagueFetching; // 0 = idle, 1 = a fetch is in flight
 
+    // The league of the character actually being played, from GGG's character list. This is the
+    // only authoritative answer available: ServerData.League reads empty even while fully in-world,
+    // and the trade API's first entry is the current CHALLENGE league — which is simply wrong when
+    // you're playing Standard, Hardcore, or anything else.
+    private volatile string _characterLeague;
+    private volatile string _characterLeagueFor; // character name the above was resolved for
+    private int _characterLeagueFetching;
+    private DateTime _characterLeagueNextAttempt = DateTime.MinValue;
+
+    private const string CharactersApiUrl = "https://www.pathofexile.com/character-window/get-characters";
+
+    /// <summary>Name of the character currently being played, or null outside the game.</summary>
+    internal string CurrentCharacterName()
+    {
+        try
+        {
+            var name = GameController?.Player?.GetComponent<ExileCore.PoEMemory.Components.Player>()?.PlayerName;
+            return string.IsNullOrWhiteSpace(name) ? null : name.Trim();
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
     /// <summary>
     /// Resolves the league to use for trade requests, in priority order:
     ///   1. The league the player is currently in (read from game memory).
@@ -29,7 +55,17 @@ public partial class TradeUtils
     /// </summary>
     internal string ResolveLeague()
     {
-        return ResolveLeagueOrNull() ?? "Standard";
+        var known = ResolveLeagueOrNull();
+        if (!string.IsNullOrWhiteSpace(known)) return known;
+
+        // Searches can live with a guess — a query aimed at the wrong league just fails, and
+        // guessing the current challenge league is right for most people most of the time. Pricing
+        // cannot, which is why it uses ResolveLeagueOrNull and refuses on null.
+        var cached = _apiLeague;
+        if (!string.IsNullOrWhiteSpace(cached)) return cached;
+
+        _ = EnsureApiLeagueAsync();
+        return "Standard";
     }
 
     /// <summary>
@@ -44,6 +80,23 @@ public partial class TradeUtils
     /// </summary>
     internal string ResolveLeagueOrNull()
     {
+        // An explicit override counts as authoritative - the user knows which league they are in,
+        // and this is the only path that doesn't depend on an API call succeeding.
+        try
+        {
+            var manual = Settings?.LeagueOverride?.Value?.Trim();
+            if (!string.IsNullOrWhiteSpace(manual))
+            {
+                if (manual.StartsWith("SSF ", StringComparison.OrdinalIgnoreCase))
+                    manual = manual.Substring(4).Trim();
+                if (!string.IsNullOrWhiteSpace(manual)) return manual;
+            }
+        }
+        catch
+        {
+            // Settings not constructed yet during load.
+        }
+
         try
         {
             var live = GameController?.IngameState?.ServerData?.League;
@@ -59,18 +112,102 @@ public partial class TradeUtils
         }
         catch
         {
-            // ServerData can throw during load screens / area transitions — fall through to the cached API value.
+            // ServerData can throw during load screens / area transitions — fall through.
         }
 
-        var cached = _apiLeague;
-        if (!string.IsNullOrWhiteSpace(cached))
-            return cached;
+        // Ask GGG which league this character is in. Deliberately NOT falling back to _apiLeague
+        // here: that is the current challenge league, which is a guess, and a guessed league prices
+        // Standard items against challenge-league rates (a Divine is ~829c against ~174c). Callers
+        // that write must get a real answer or nothing.
+        var character = CurrentCharacterName();
+        if (character == null) return null;
 
-        // Nothing cached yet: kick off a one-time background fetch so a later call resolves it.
-        // In practice this is the path that runs, because ServerData.League reads empty even while
-        // fully in-world, so the API is what actually resolves the league.
-        _ = EnsureApiLeagueAsync();
+        if (string.Equals(character, _characterLeagueFor, StringComparison.Ordinal))
+        {
+            var known = _characterLeague;
+            if (!string.IsNullOrWhiteSpace(known)) return known;
+        }
+
+        _ = EnsureCharacterLeagueAsync(character);
         return null;
+    }
+
+    /// <summary>
+    /// Looks up the league of <paramref name="character"/> in GGG's character list and caches it.
+    /// Runs at most once at a time, and re-runs when the character changes.
+    /// </summary>
+    internal async Task EnsureCharacterLeagueAsync(string character)
+    {
+        if (string.IsNullOrWhiteSpace(character)) return;
+        if (string.Equals(character, _characterLeagueFor, StringComparison.Ordinal) &&
+            !string.IsNullOrWhiteSpace(_characterLeague))
+            return;
+
+        // ResolveLeagueOrNull runs from the render loop, so without a backoff every failure here
+        // fires another request on the very next frame - a request storm aimed at GGG.
+        if (DateTime.Now < _characterLeagueNextAttempt) return;
+        if (Interlocked.Exchange(ref _characterLeagueFetching, 1) == 1) return;
+        _characterLeagueNextAttempt = DateTime.Now.AddMinutes(2);
+
+        try
+        {
+            var sessionId = EncryptedSettings.GetSecureSessionId();
+            if (string.IsNullOrWhiteSpace(sessionId))
+            {
+                LogMessage("League: POESESSID isn't set, so the character's league can't be confirmed. " +
+                           "Repricing stays disabled until it is — set it in settings.");
+                return;
+            }
+
+            using (var request = new HttpRequestMessage(HttpMethod.Get, CharactersApiUrl))
+            {
+                request.Headers.Add("User-Agent", PluginUserAgent);
+                request.Headers.Add("Cookie", $"POESESSID={sessionId}");
+
+                using (var response = await _httpClient.SendAsync(request))
+                {
+                    if (!response.IsSuccessStatusCode)
+                    {
+                        LogError($"League: character list returned HTTP {(int)response.StatusCode}. " +
+                                 "A 401 means the POESESSID has expired.");
+                        return;
+                    }
+
+                    var json = await response.Content.ReadAsStringAsync();
+                    var characters = JArray.Parse(json);
+
+                    foreach (var entry in characters)
+                    {
+                        var name = (string)entry["name"];
+                        if (!string.Equals(name, character, StringComparison.Ordinal)) continue;
+
+                        var league = ((string)entry["league"])?.Trim();
+                        if (string.IsNullOrWhiteSpace(league)) break;
+
+                        // SSF isn't tradeable; price against the parent league it mirrors.
+                        if (league.StartsWith("SSF ", StringComparison.OrdinalIgnoreCase))
+                            league = league.Substring(4).Trim();
+
+                        _characterLeague = league;
+                        _characterLeagueFor = character;
+                        _characterLeagueNextAttempt = DateTime.MinValue;
+                        LogMessage($"League: '{character}' is in '{league}'.");
+                        return;
+                    }
+
+                    LogError($"League: '{character}' wasn't in the account's character list, so its league " +
+                             "is unknown. Repricing stays disabled.");
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            LogError($"League: couldn't look up the character's league ({ex.Message}).");
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _characterLeagueFetching, 0);
+        }
     }
 
     /// <summary>

@@ -40,6 +40,26 @@ public partial class TradeUtils
     private const int LowerPriceStashValueDisplayY = 100;
     private const int LowerPriceStepDownMaxAmount = 10000;
 
+    /// <summary>Press-to-release hold, and the settle inside a single gesture. A real click is
+    /// tens of milliseconds, not the full inter-action delay.</summary>
+    private const int LowerPriceClickHoldMs = 15;
+
+    /// <summary>
+    /// How often the UI waits re-check. Every wait in a step down - dialog open, list open, list
+    /// close, dialog close - used to round up to the next 25ms tick, so this was costing more than
+    /// the clicks themselves.
+    /// </summary>
+    private const int LowerPriceUiPollMs = 8;
+
+    /// <summary>
+    /// How long to wait for the Set Item Price dialog after right-clicking an item. This doubles as
+    /// the locked-item test: the client paints a padlock on items it won't let you price, but that
+    /// padlock has no element behind it - no texture, no distinct tooltip type, nothing readable -
+    /// so "the dialog didn't open" is the only signal there is. Kept short so skipping a tab full
+    /// of locked items costs a fraction of a second each rather than seconds.
+    /// </summary>
+    private const int LowerPriceDialogOpenTimeoutMs = 600;
+
     /// <summary>Humanised pause between UI actions, drawn fresh each time it's read.</summary>
     private int LowerPriceStepDelayMs =>
         ActionDelayWithJitterMs;
@@ -51,6 +71,7 @@ public partial class TradeUtils
     private bool _lowerPriceTimerExpired = false;
     private WaveOutEvent _lowerPriceWaveOut;
     private bool _lowerPriceManualRepriceTriggered = false;
+    private int _lowerPriceRunning; // 0 = idle, 1 = a reprice run is in flight
     private bool _lowerPriceWasStashVisible = false;
     private int _lowerPriceButtonRenderCount = 0;
     private bool _lowerPriceImageLoaded = false;
@@ -219,7 +240,10 @@ public partial class TradeUtils
                 var windowTopLeft = GameController.Window.GetWindowRectangleTimeCache.TopLeft;
                 var buttonPos = new Vector2(windowTopLeft.X, windowTopLeft.Y) + offset;
                 var buttonRect = new RectangleF(buttonPos.X, buttonPos.Y, buttonSize, buttonSize);
-                
+
+                // Second button, immediately to the right: same reprice, every tab.
+                var allTabsRect = new RectangleF(buttonPos.X + buttonSize + 6, buttonPos.Y, buttonSize, buttonSize);
+
                 // Debug button rendering on first render
                 if (_lowerPriceButtonRenderCount < 3)
                 {
@@ -269,20 +293,61 @@ public partial class TradeUtils
                     LogError($"LowerPrice DEBUG: Failed to draw button: {ex.Message}");
                 }
 
+                // The all-tabs button, drawn as a plain labelled box - there's no art for it.
+                try
+                {
+                    Graphics.DrawBox(allTabsRect, new SharpDX.Color(60, 90, 160, 220));
+                    Graphics.DrawFrame(allTabsRect, new SharpDX.Color(255, 255, 255, 255), 2);
+                    Graphics.DrawText("ALL", new Vector2(allTabsRect.X + 5, allTabsRect.Y + 12),
+                                      new SharpDX.Color(255, 255, 255, 255));
+                }
+                catch (Exception ex)
+                {
+                    LogError($"LowerPrice DEBUG: Failed to draw all-tabs button: {ex.Message}");
+                }
+
                 // Check for button press or manual trigger
                 var buttonPressed = IsLowerPriceButtonPressed(buttonRect);
-                if (buttonPressed || _lowerPriceManualRepriceTriggered)
+                var allTabsPressed = IsLowerPriceButtonPressed(allTabsRect);
+
+                if (buttonPressed || allTabsPressed || _lowerPriceManualRepriceTriggered)
                 {
-                    LogMessage($"LowerPrice DEBUG: Button pressed={buttonPressed}, ManualTrigger={_lowerPriceManualRepriceTriggered}");
+                    var sweepAllTabs = allTabsPressed;
+                    LogMessage($"LowerPrice DEBUG: Button pressed={buttonPressed}, AllTabs={allTabsPressed}, ManualTrigger={_lowerPriceManualRepriceTriggered}");
                     _lowerPriceManualRepriceTriggered = false; // Reset manual trigger
-                    _ = Task.Run(async () =>
+
+                    // One run at a time. Without this a second click part-way through starts a
+                    // parallel pass that fights the first one for the mouse.
+                    if (System.Threading.Interlocked.Exchange(ref _lowerPriceRunning, 1) == 1)
                     {
-                        while (Control.MouseButtons == MouseButtons.Left)
+                        LogMessage("LowerPrice: a reprice run is already going; ignoring the click.");
+                    }
+                    else
+                    {
+                        _ = Task.Run(async () =>
                         {
-                            await Task.Delay(10);
-                        }
-                        UpdateLowerPriceAllItemPrices(offlineMerchantPanel);
-                    });
+                            try
+                            {
+                                while (Control.MouseButtons == MouseButtons.Left)
+                                {
+                                    await Task.Delay(10);
+                                }
+
+                                if (sweepAllTabs)
+                                    await RepriceAllLowerPriceTabs();
+                                else
+                                    await UpdateLowerPriceAllItemPrices(offlineMerchantPanel);
+                            }
+                            catch (Exception ex)
+                            {
+                                LogError($"LowerPrice: reprice run failed ({ex.Message}).");
+                            }
+                            finally
+                            {
+                                System.Threading.Interlocked.Exchange(ref _lowerPriceRunning, 0);
+                            }
+                        });
+                    }
                 }
             }
         }
@@ -333,7 +398,12 @@ public partial class TradeUtils
         }
     }
 
-    private async void UpdateLowerPriceAllItemPrices(object offlineMerchantPanel)
+    /// <summary>
+    /// Reprices every item in the tab that is currently open. Returns false when the run hit
+    /// something that should stop an all-tabs sweep too (chat opened, a wrong-currency step down),
+    /// as opposed to merely finding nothing to do.
+    /// </summary>
+    private async Task<bool> UpdateLowerPriceAllItemPrices(object offlineMerchantPanel)
     {
         try
         {
@@ -345,13 +415,13 @@ public partial class TradeUtils
             if (panel == null)
             {
                 LogError("LowerPrice DEBUG: OfflineMerchantPanel is null");
-                return;
+                return false;
             }
             
             if (!panel.IsVisible)
             {
                 LogError("LowerPrice DEBUG: OfflineMerchantPanel is not visible");
-                return;
+                return false;
             }
             
             // OfflineMerchantPanel is a StashElement, so we need to access VisibleStash first
@@ -359,7 +429,7 @@ public partial class TradeUtils
             if (visibleStash == null)
             {
                 LogError("LowerPrice DEBUG: VisibleStash is null");
-                return;
+                return true;
             }
             
             var items = visibleStash.VisibleInventoryItems;
@@ -367,7 +437,7 @@ public partial class TradeUtils
             if (items == null)
             {
                 LogError("LowerPrice DEBUG: VisibleInventoryItems is null");
-                return;
+                return true;
             }
             
             var itemCount = items.Count();
@@ -376,7 +446,7 @@ public partial class TradeUtils
             if (!items.Any())
             {
                 LogMessage("LowerPrice DEBUG: No items to process");
-                return;
+                return true;
             }
 
             int processedCount = 0;
@@ -386,6 +456,13 @@ public partial class TradeUtils
             int pickedUp = 0;
             int steppedDown = 0;
             bool stepDownVerificationFailed = false;
+            bool chatWasOpen = false;
+            int unverifiedStepDowns = 0;
+
+            // The dropdown row order can't change part-way through a run, so the first step down is
+            // the only one worth checking. Checked, not proven - if the tooltip couldn't be read the
+            // rest of the run simply goes unverified rather than paying the wait again each time.
+            bool stepDownRowOrderChecked = false;
             bool structureDumped = false;  // Only dump structure once for first item
             
             foreach (var item in items)
@@ -394,9 +471,27 @@ public partial class TradeUtils
                 {
                     processedCount++;
                     
-                    if (!panel.IsVisible || LowerPriceMoveCancellationRequested)
+                    if (LowerPriceMoveCancellationRequested)
                     {
-                        LogMessage($"LowerPrice DEBUG: Breaking - PanelVisible={panel.IsVisible}, CancelRequested={LowerPriceMoveCancellationRequested}");
+                        LogMessage("LowerPrice DEBUG: Breaking - right mouse button held (cancel)");
+                        break;
+                    }
+
+                    // Hard stop: if the chat input is open, the next keystroke goes into a public
+                    // channel instead of a price field. Close it and abandon the run.
+                    if (IsLowerPriceChatOpen())
+                    {
+                        Utility.Keyboard.KeyPress(Keys.Escape);
+                        chatWasOpen = true;
+                        break;
+                    }
+
+                    // Committing a price dialog can blank the panel for a frame or two. Closing it
+                    // for real is still the way to stop a run, so only give up once it stays gone.
+                    if (!panel.IsVisible &&
+                        !await WaitForLowerPriceCondition(() => panel.IsVisible, 750))
+                    {
+                        LogMessage("LowerPrice DEBUG: Breaking - merchant panel closed");
                         break;
                     }
 
@@ -504,16 +599,35 @@ public partial class TradeUtils
                                                         if (stepPrice > 0)
                                                         {
                                                             LogMessage($"LowerPrice DEBUG: Item {processedCount} - Stepping down {oldPrice}x {orbType} to {stepPrice}x {targetOrb}");
-                                                            if (await TryLowerPriceStepDownListing(stepPrice, targetOrb, position))
+                                                            var itemIsLocked = false;
+                                                            if (await TryLowerPriceStepDownListing(stepPrice, targetOrb, position,
+                                                                                                  () => itemIsLocked = true))
                                                             {
-                                                                // The currency dropdown can't be read back, so the listing is only
-                                                                // trustworthy once the item's own tooltip agrees. If it doesn't, the
-                                                                // row order has moved and every later item would be mispriced the
-                                                                // same way — stop rather than work through the tab.
-                                                                if (!await VerifyLowerPriceStepDown(item, position, stepPrice, targetOrb))
+                                                                // The currency dropdown can't be read back, so the tooltip is the only
+                                                                // check available - and it costs a full hover-rebuild wait. Since the
+                                                                // row order is fixed for the length of a run, checking the first step
+                                                                // down proves it for all of them; the rest skip straight through.
+                                                                if (!stepDownRowOrderChecked)
                                                                 {
-                                                                    stepDownVerificationFailed = true;
-                                                                    break;
+                                                                    // Once per run, whatever the outcome. Retrying on every item is
+                                                                    // what made this crawl: an unconfirmable tooltip meant each step
+                                                                    // down paid the full wait again for a check that was never going
+                                                                    // to pass.
+                                                                    stepDownRowOrderChecked = true;
+
+                                                                    var verdict = await VerifyLowerPriceStepDown(
+                                                                        item, position, stepPrice, targetOrb, oldPrice, orbType);
+
+                                                                    // Only a positively wrong currency means anything is broken. A
+                                                                    // tooltip that won't rebuild in time proves nothing either way.
+                                                                    if (verdict == LowerPriceStepDownVerdict.WrongCurrency)
+                                                                    {
+                                                                        stepDownVerificationFailed = true;
+                                                                        break;
+                                                                    }
+
+                                                                    if (verdict != LowerPriceStepDownVerdict.Confirmed)
+                                                                        unverifiedStepDowns++;
                                                                 }
 
                                                                 steppedDown++;
@@ -525,8 +639,15 @@ public partial class TradeUtils
                                                                     _lowerPriceTimerExpired = false;
                                                                 }
 
-                                                                await TaskUtils.NextFrame();
-                                                                await Task.Delay(LowerPriceStepDelayMs);
+                                                                // No trailing pause: the next iteration opens with its own move-and-
+                                                                // settle before it touches anything, so waiting here just doubled it.
+                                                                continue;
+                                                            }
+
+                                                            if (itemIsLocked)
+                                                            {
+                                                                LogMessage($"LowerPrice DEBUG: Item {processedCount} - locked, skipping.");
+                                                                skippedLocked++;
                                                                 continue;
                                                             }
 
@@ -565,17 +686,35 @@ public partial class TradeUtils
                                                     if (newPrice < 1) newPrice = 1;
                                                     LogMessage($"LowerPrice DEBUG: Item {processedCount} - Repricing from {oldPrice} to {newPrice}");
                                                     Utility.Mouse.RightDown();
-                                                    await TaskUtils.NextFrame();
-                                                    await Task.Delay(LowerPriceStepDelayMs);
+                                                    await LowerPriceInputDelay();
                                                     Utility.Mouse.RightUp();
-                                                    await TaskUtils.NextFrame();
-                                                    await Task.Delay(LowerPriceStepDelayMs);
+
+                                                    // Never type without the price dialog in front of it. This used to fire blind:
+                                                    // one right-click that didn't land meant the digits went nowhere and Enter
+                                                    // opened chat, after which every remaining item typed its price into chat and
+                                                    // Enter sent it. A hundred-item tab became a hundred public messages.
+                                                    if (await WaitForLowerPriceDialog(LowerPriceDialogOpenTimeoutMs) == null)
+                                                    {
+                                                        LogMessage($"LowerPrice DEBUG: Item {processedCount} - price dialog didn't open (locked); skipping.");
+                                                        skippedLocked++;
+                                                        await LowerPriceActionStep();
+                                                        continue;
+                                                    }
+
                                                     Utility.Keyboard.Type($"{newPrice}");
-                                                    await TaskUtils.NextFrame();
-                                                    await Task.Delay(LowerPriceStepDelayMs);
+                                                    await LowerPriceInputDelay();
+
+                                                    // Enter is only safe while the dialog still owns the keyboard.
+                                                    if (GetLowerPriceDialog() == null)
+                                                    {
+                                                        LogError($"LowerPrice: item {processedCount} - the price dialog closed mid-edit; not pressing Enter.");
+                                                        skippedNoPrice++;
+                                                        await LowerPriceActionStep();
+                                                        continue;
+                                                    }
+
                                                     Utility.Keyboard.KeyPress(Keys.Enter);
-                                                    await TaskUtils.NextFrame();
-                                                    await Task.Delay(LowerPriceStepDelayMs);
+                                                    await LowerPriceActionStep();
                                                     repriced++;
                                                     LogMessage($"LowerPrice DEBUG: Item {processedCount} - Successfully repriced!");
                                                     
@@ -654,15 +793,225 @@ public partial class TradeUtils
             LogMessage($"LowerPrice DEBUG: Items stepped down a currency: {steppedDown}");
             LogMessage($"LowerPrice DEBUG: Items picked up: {pickedUp}");
 
+            if (unverifiedStepDowns > 0)
+                LogMessage("LowerPrice: couldn't read the first step down back off the item's tooltip, so this " +
+                           "run's step downs went unverified. They were relisted; the currency just wasn't " +
+                           "confirmed. Spot-check one.");
+
+            if (chatWasOpen)
+                LogError("=== LowerPrice: run STOPPED because the chat input was open. Nothing was typed into it. " +
+                         "Chat was closed for you; check the last item's price and re-run. ===");
+
             if (stepDownVerificationFailed)
-                LogError("=== LowerPrice: run STOPPED early because a step down couldn't be verified. " +
-                         "The last item touched may be listed in the wrong currency — check it before running again. ===");
+                LogError("=== LowerPrice: run STOPPED early because a step down landed on the WRONG CURRENCY. " +
+                         "The last item touched is mispriced — fix it, and fix LowerPriceCurrencyRowIndex, " +
+                         "before running again. ===");
+
+            // Both of these mean the next tab would go the same way, so an all-tabs sweep must stop
+            // rather than repeat the mistake 20 more times.
+            return !chatWasOpen && !stepDownVerificationFailed;
         }
         catch (Exception ex)
         {
             // Log error for the entire reprice operation
             LogError($"LowerPrice DEBUG: Error in UpdateAllItemPrices: {ex.Message}\nStackTrace: {ex.StackTrace}");
+            return false;
         }
+    }
+
+    // ===== Shop tabs =====
+    //
+    // The merchant's shop tabs are NOT what ExileCore calls the panel's stashes. OfflineMerchantPanel
+    // reports exactly two "stashes" - Shop and Earnings (Remove-only) - while the tabs you actually
+    // list items in live inside the Shop view as a plain element strip that ExileCore doesn't model.
+    // Everything below drives that strip directly, off a path verified against the live client.
+    //
+    // OfflineMerchantPanel -> [2][0][0][1][1][0][0][1] is the tab bar, whose children are:
+    //   [1] one container per shop tab; exactly one is IsVisibleLocal - that's the selected tab
+    //   [2] the dropdown toggle button
+    //   [4] the dropdown list, whose [2] holds one row per tab in the same order as [1]
+    //   [6] / [7] the left / right scroll arrows
+    //
+    // Selection goes through the dropdown rather than the strip: the strip is a 737px viewport over
+    // a ~2500px row, so most tabs sit outside it and clicking their reported rect would land on
+    // whatever is drawn there instead.
+    private static readonly int[] LowerPriceShopTabBarPath = { 2, 0, 0, 1, 1, 0, 0, 1 };
+    private const int LowerPriceShopGridsIndex = 1;
+    private const int LowerPriceShopDropdownButtonIndex = 2;
+    private const int LowerPriceShopDropdownListIndex = 4;
+    private const int LowerPriceShopDropdownRowsIndex = 2;
+
+    /// <summary>Walks a chain of child indices, returning null the moment one doesn't exist.</summary>
+    private static Element NavigateLowerPriceChildren(Element root, params int[] path)
+    {
+        var element = root;
+        foreach (var index in path)
+        {
+            if (element == null) return null;
+            IList<Element> children;
+            try { children = element.Children; } catch { return null; }
+            if (children == null || index < 0 || index >= children.Count) return null;
+            element = children[index];
+        }
+
+        return element;
+    }
+
+    private Element GetLowerPriceShopGrids()
+    {
+        var panel = GameController?.IngameState?.IngameUi?.OfflineMerchantPanel;
+        if (panel?.IsVisible != true) return null;
+
+        var tabBar = NavigateLowerPriceChildren(panel, LowerPriceShopTabBarPath);
+        return NavigateLowerPriceChildren(tabBar, LowerPriceShopGridsIndex);
+    }
+
+    /// <summary>Index of the shop tab on screen, or -1. Exactly one tab container is ever visible.</summary>
+    private static int CurrentLowerPriceShopTab(Element grids)
+    {
+        if (grids == null) return -1;
+        try
+        {
+            for (var i = 0; i < grids.ChildCount; i++)
+                if (grids.Children[i].IsVisibleLocal) return i;
+        }
+        catch { }
+
+        return -1;
+    }
+
+    /// <summary>Tab label, read off the dropdown row so it matches what's on screen.</summary>
+    private string LowerPriceShopTabName(int index)
+    {
+        var panel = GameController?.IngameState?.IngameUi?.OfflineMerchantPanel;
+        var tabBar = NavigateLowerPriceChildren(panel, LowerPriceShopTabBarPath);
+        var label = NavigateLowerPriceChildren(tabBar, LowerPriceShopDropdownListIndex,
+                                               LowerPriceShopDropdownRowsIndex, index, 0, 1);
+        try
+        {
+            var text = label?.TextNoTags;
+            if (!string.IsNullOrWhiteSpace(text)) return text.Trim();
+        }
+        catch { }
+
+        return $"tab {index + 1}";
+    }
+
+    private async Task<bool> SelectLowerPriceShopTab(int index)
+    {
+        var panel = GameController?.IngameState?.IngameUi?.OfflineMerchantPanel;
+        var tabBar = NavigateLowerPriceChildren(panel, LowerPriceShopTabBarPath);
+        var grids = NavigateLowerPriceChildren(tabBar, LowerPriceShopGridsIndex);
+        if (tabBar == null || grids == null) return false;
+
+        if (CurrentLowerPriceShopTab(grids) == index) return true;
+
+        var list = NavigateLowerPriceChildren(tabBar, LowerPriceShopDropdownListIndex);
+        if (list?.IsVisibleLocal != true)
+        {
+            var toggle = NavigateLowerPriceChildren(tabBar, LowerPriceShopDropdownButtonIndex);
+            if (toggle == null) return false;
+
+            await LowerPriceClickElement(toggle.GetClientRectCache);
+            if (!await WaitForLowerPriceCondition(
+                    () => NavigateLowerPriceChildren(tabBar, LowerPriceShopDropdownListIndex)?.IsVisibleLocal == true,
+                    1500))
+            {
+                LogError("LowerPrice: the shop tab dropdown didn't open.");
+                return false;
+            }
+        }
+
+        var row = NavigateLowerPriceChildren(tabBar, LowerPriceShopDropdownListIndex,
+                                             LowerPriceShopDropdownRowsIndex, index);
+        if (row == null) return false;
+
+        var rect = row.GetClientRectCache;
+        if (rect.Width <= 0 || rect.Height <= 0) return false;
+
+        await LowerPriceClickElement(rect);
+
+        // The tab is only usable once its container is the visible one AND the panel is reporting
+        // that tab's items - reading straight after the click returns the previous tab's contents.
+        if (!await WaitForLowerPriceCondition(() => CurrentLowerPriceShopTab(grids) == index, 3000))
+            return false;
+
+        return await WaitForLowerPriceCondition(
+            () => GameController?.IngameState?.IngameUi?.OfflineMerchantPanel?.VisibleStash?.VisibleInventoryItems != null,
+            3000);
+    }
+
+    /// <summary>
+    /// Walks every shop tab and reprices each one, then returns to the tab it started on.
+    /// </summary>
+    private async Task RepriceAllLowerPriceTabs()
+    {
+        var panel = GameController?.IngameState?.IngameUi?.OfflineMerchantPanel;
+        if (panel?.IsVisible != true)
+        {
+            LogError("LowerPrice: the merchant panel isn't open, so there are no tabs to sweep.");
+            return;
+        }
+
+        var grids = GetLowerPriceShopGrids();
+        var tabCount = grids == null ? 0 : (int)grids.ChildCount;
+        if (tabCount == 0)
+        {
+            LogError("LowerPrice: couldn't find the shop tab strip. The merchant UI layout has changed - " +
+                     "LowerPriceShopTabBarPath needs updating.");
+            return;
+        }
+
+        var startingTab = CurrentLowerPriceShopTab(grids);
+        LogMessage($"=== LowerPrice: repricing all {tabCount} shop tabs ===");
+
+        var swept = 0;
+        var unreachable = 0;
+
+        for (var tab = 0; tab < tabCount; tab++)
+        {
+            if (LowerPriceMoveCancellationRequested)
+            {
+                LogMessage("LowerPrice: all-tabs sweep cancelled (right mouse button).");
+                break;
+            }
+
+            if (IsLowerPriceChatOpen())
+            {
+                Utility.Keyboard.KeyPress(Keys.Escape);
+                LogError("=== LowerPrice: all-tabs sweep STOPPED because the chat input was open. ===");
+                break;
+            }
+
+            if (GameController?.IngameState?.IngameUi?.OfflineMerchantPanel?.IsVisible != true)
+            {
+                LogMessage("LowerPrice: merchant panel closed, ending the sweep.");
+                break;
+            }
+
+            if (!await SelectLowerPriceShopTab(tab))
+            {
+                unreachable++;
+                LogError($"LowerPrice: couldn't switch to shop tab {tab + 1}/{tabCount}; skipping it.");
+                continue;
+            }
+
+            var tabName = LowerPriceShopTabName(tab);
+            LogMessage($"--- LowerPrice: shop tab {tab + 1}/{tabCount} ({tabName}) ---");
+
+            swept++;
+            if (!await UpdateLowerPriceAllItemPrices(null))
+            {
+                LogError($"=== LowerPrice: all-tabs sweep STOPPED at shop tab {tab + 1}/{tabCount} ({tabName}). ===");
+                break;
+            }
+        }
+
+        // Put the panel back on the tab it was found on.
+        if (startingTab >= 0) await SelectLowerPriceShopTab(startingTab);
+
+        LogMessage($"=== LowerPrice: all-tabs sweep finished - {swept} tab(s) repriced" +
+                   (unreachable > 0 ? $", {unreachable} unreachable" : "") + " ===");
     }
 
     /// <summary>
@@ -877,7 +1226,8 @@ public partial class TradeUtils
     /// Returns false with the listing untouched if any step doesn't land, and puts the cursor back
     /// on the item at <paramref name="itemPosition"/> so the caller's fallback path still aims at it.
     /// </summary>
-    private async Task<bool> TryLowerPriceStepDownListing(int amount, string targetOrb, Vector2 itemPosition)
+    private async Task<bool> TryLowerPriceStepDownListing(int amount, string targetOrb, Vector2 itemPosition,
+                                                          Action onItemNotPriceable = null)
     {
         if (!LowerPriceCurrencyRowIndex.TryGetValue(targetOrb, out var rowIndex))
         {
@@ -887,20 +1237,28 @@ public partial class TradeUtils
 
         // Same gesture the in-currency path uses to start an edit.
         Utility.Mouse.RightDown();
-        await LowerPriceActionStep();
+        await LowerPriceInputDelay();
         Utility.Mouse.RightUp();
-        await LowerPriceActionStep();
 
-        var dialog = await WaitForLowerPriceDialog(2000);
+        var dialog = await WaitForLowerPriceDialog(LowerPriceDialogOpenTimeoutMs);
         if (dialog == null)
         {
             // Distinguish "nothing opened" from "something else opened", because the second one
             // means the title check saved us from driving an unrelated popup.
             var popUp = GameController?.IngameState?.IngameUi?.PopUpWindow;
             var title = ReadLowerPriceDialogTitle(popUp);
-            LogError(popUp?.IsVisible == true && !string.IsNullOrWhiteSpace(title)
-                ? $"LowerPrice: right-click opened '{title}', not the {LowerPriceDialogTitle} dialog; leaving it alone."
-                : $"LowerPrice: right-clicking the item didn't open the {LowerPriceDialogTitle} dialog.");
+
+            if (popUp?.IsVisible == true && !string.IsNullOrWhiteSpace(title))
+            {
+                LogError($"LowerPrice: right-click opened '{title}', not the {LowerPriceDialogTitle} dialog; leaving it alone.");
+            }
+            else
+            {
+                // The item can't be priced at all - locked. Tell the caller so it skips this item
+                // outright instead of falling through and paying the same timeout a second time.
+                onItemNotPriceable?.Invoke();
+            }
+
             return false;
         }
 
@@ -968,7 +1326,7 @@ public partial class TradeUtils
             var dialog = GetLowerPriceDialog();
             if (dialog != null) return dialog;
             if (stopwatch.ElapsedMilliseconds >= timeoutMs) return null;
-            await Task.Delay(25);
+            await Task.Delay(LowerPriceUiPollMs);
         }
     }
 
@@ -1086,10 +1444,10 @@ public partial class TradeUtils
         Utility.Keyboard.KeyDown(Keys.LControlKey);
         Utility.Keyboard.KeyPress(Keys.A);
         Utility.Keyboard.KeyUp(Keys.LControlKey);
-        await LowerPriceActionStep();
+        await LowerPriceInputDelay();
 
         Utility.Keyboard.Type(amount.ToString(CultureInfo.InvariantCulture));
-        await LowerPriceActionStep();
+        await LowerPriceInputDelay();
 
         // This field, unlike the dropdown, does expose its text - so a mistyped amount is catchable
         // before anything gets committed.
@@ -1144,66 +1502,112 @@ public partial class TradeUtils
             LogError("LowerPrice: couldn't close the price dialog; stop the run and check the listing by hand.");
     }
 
-    /// <summary>
-    /// Confirms a step down actually produced the intended listing, by re-hovering the item and
-    /// reading its tooltip. This is the entire safety net for the unreadable dropdown: if the client
-    /// ever reorders the currency list, this is what catches it.
-    /// </summary>
-    private async Task<bool> VerifyLowerPriceStepDown(NormalInventoryItem item, Vector2 itemPosition,
-                                                      int expectedAmount, string expectedOrb)
+    private enum LowerPriceStepDownVerdict
     {
+        /// <summary>The tooltip reads back exactly what was set.</summary>
+        Confirmed,
+
+        /// <summary>Couldn't confirm — no readable tooltip, or it still shows the old listing.</summary>
+        Unverified,
+
+        /// <summary>The tooltip shows a listing nobody asked for. The dropdown row order has moved.</summary>
+        WrongCurrency,
+    }
+
+    /// <summary>
+    /// Checks what a step down actually produced, by re-hovering the item and reading its tooltip.
+    /// This is the entire safety net for the unreadable dropdown.
+    ///
+    /// The three outcomes are deliberately kept apart. Only <see cref="LowerPriceStepDownVerdict.WrongCurrency"/>
+    /// means something went wrong — a tooltip that won't rebuild in time, or one still showing the
+    /// pre-relist price, says nothing about whether the listing is correct. Treating those as
+    /// failures is what used to abandon the rest of the tab after the first successful step down.
+    /// </summary>
+    private async Task<LowerPriceStepDownVerdict> VerifyLowerPriceStepDown(
+        NormalInventoryItem item, Vector2 itemPosition,
+        int expectedAmount, string expectedOrb,
+        int previousAmount, string previousOrb)
+    {
+        // Committing the dialog can leave the cursor on the item already, and moving to the pixel
+        // it's already on is not a move — the client never re-hovers and the tooltip never rebuilds.
+        // Step off first so there's a real hover transition.
+        Utility.Mouse.moveMouse(new Vector2(itemPosition.X, itemPosition.Y - 80));
+        await LowerPriceInputDelay();
         Utility.Mouse.moveMouse(itemPosition);
-        await LowerPriceActionStep();
+        await LowerPriceInputDelay();
 
-        var price = 0;
-        string orbType = null;
-        var read = false;
-
+        var sawOldListing = false;
         var stopwatch = System.Diagnostics.Stopwatch.StartNew();
-        while (stopwatch.ElapsedMilliseconds < 2000)
+
+        // Bounded tightly: this runs once per run, and a tooltip that hasn't rebuilt within a
+        // second isn't going to.
+        while (stopwatch.ElapsedMilliseconds < 1200)
         {
-            if (TryReadLowerPriceTooltipPrice(item, out price, out orbType))
+            if (TryReadLowerPriceCurrentPrice(item, out var price, out var orbType))
             {
-                read = true;
-                break;
+                var orb = orbType?.Trim();
+
+                if (price == expectedAmount && string.Equals(orb, expectedOrb, StringComparison.OrdinalIgnoreCase))
+                    return LowerPriceStepDownVerdict.Confirmed;
+
+                if (price == previousAmount && string.Equals(orb, previousOrb, StringComparison.OrdinalIgnoreCase))
+                {
+                    // Stale tooltip, not a bad price. Keep waiting for the client to catch up.
+                    sawOldListing = true;
+                }
+                else
+                {
+                    LogError($"LowerPrice: step down produced {price}x {orb}, not {expectedAmount}x {expectedOrb}. " +
+                             "The client's currency row order no longer matches LowerPriceCurrencyRowIndex - fix " +
+                             "that before running again.");
+                    return LowerPriceStepDownVerdict.WrongCurrency;
+                }
             }
 
             await Task.Delay(50);
         }
 
-        if (!read)
-        {
-            LogError($"LowerPrice: couldn't re-read the item's price after relisting it as {expectedAmount}x " +
-                     $"{expectedOrb}, so the new listing is unverified. Check it by hand.");
-            return false;
-        }
+        LogMessage(sawOldListing
+            ? $"LowerPrice: relisted as {expectedAmount}x {expectedOrb}, but the tooltip still showed the old " +
+              $"{previousAmount}x {previousOrb} - couldn't confirm it, carrying on."
+            : $"LowerPrice: relisted as {expectedAmount}x {expectedOrb}, but couldn't re-read the item's price " +
+              "to confirm it - carrying on.");
 
-        if (price != expectedAmount ||
-            !string.Equals(orbType?.Trim(), expectedOrb, StringComparison.OrdinalIgnoreCase))
-        {
-            LogError($"LowerPrice: step down produced {price}x {orbType}, not {expectedAmount}x {expectedOrb}. " +
-                     "The client's currency row order no longer matches LowerPriceCurrencyRowIndex - fix that " +
-                     "before running again.");
-            return false;
-        }
+        return LowerPriceStepDownVerdict.Unverified;
+    }
 
-        return true;
+    /// <summary>
+    /// Reads the item's asking price after a relist. Tries the captured element first, then whatever
+    /// the client currently reports as hovered — relisting rebuilds the merchant panel's item list,
+    /// which leaves the captured reference pointing at an address that no longer holds a tooltip.
+    /// </summary>
+    private bool TryReadLowerPriceCurrentPrice(NormalInventoryItem item, out int price, out string orbType)
+    {
+        if (TryReadLowerPriceTooltipPrice(item?.Tooltip, out price, out orbType)) return true;
+
+        Element hoverTooltip = null;
+        try { hoverTooltip = GameController?.IngameState?.UIHoverTooltip; } catch { }
+        if (TryReadLowerPriceTooltipPrice(hoverTooltip, out price, out orbType)) return true;
+
+        Element hovered = null;
+        try { hovered = GameController?.IngameState?.UIHover?.Tooltip; } catch { }
+        return TryReadLowerPriceTooltipPrice(hovered, out price, out orbType);
     }
 
     /// <summary>
     /// Reads "Asking Price: Nx &lt;Currency&gt;" off a merchant item's hover tooltip, the same shape
     /// the reprice loop parses inline.
     /// </summary>
-    private static bool TryReadLowerPriceTooltipPrice(NormalInventoryItem item, out int price, out string orbType)
+    private static bool TryReadLowerPriceTooltipPrice(Element tooltip, out int price, out string orbType)
     {
         price = 0;
         orbType = null;
 
         try
         {
-            var priceRow = item?.Tooltip?.Children?.ElementAtOrDefault(0)
-                                       ?.Children?.ElementAtOrDefault(1)
-                                       ?.Children?.LastOrDefault();
+            var priceRow = tooltip?.Children?.ElementAtOrDefault(0)
+                                  ?.Children?.ElementAtOrDefault(1)
+                                  ?.Children?.LastOrDefault();
 
             var priceGroup = priceRow?.Children?.ElementAtOrDefault(1);
             if (priceGroup?.Children == null || priceGroup.Children.Count < 3) return false;
@@ -1228,18 +1632,46 @@ public partial class TradeUtils
         var target = new Vector2(windowTopLeft.X + rect.X + rect.Width / 2f,
                                  windowTopLeft.Y + rect.Y + rect.Height / 2f);
 
+        // A click is one gesture, not three actions. This used to spend a full action delay after
+        // the move, between the press and release, and again afterwards - roughly a quarter second
+        // per click, times four clicks per step down. The press/release only needs to outlast a
+        // frame; the settle afterwards is what the client actually needs.
         Utility.Mouse.moveMouse(target);
-        await LowerPriceActionStep();
+        await LowerPriceInputDelay();
         Utility.Mouse.LeftDown();
-        await LowerPriceActionStep();
+        await Task.Delay(LowerPriceClickHoldMs);
         Utility.Mouse.LeftUp();
-        await LowerPriceActionStep();
+        await LowerPriceInputDelay();
     }
 
+    /// <summary>Full settle between distinct actions.</summary>
     private async Task LowerPriceActionStep()
     {
         await TaskUtils.NextFrame();
         await Task.Delay(LowerPriceStepDelayMs);
+    }
+
+    /// <summary>
+    /// Short settle within a single gesture. Deliberately does NOT wait on a render frame: this only
+    /// spaces out synthesised input, and the plugin doesn't read any UI state across it. The waits
+    /// that DO need fresh state poll for it explicitly. Ten of these per step down were each costing
+    /// a full frame tick on top of the sleep, for nothing.
+    /// </summary>
+    private static Task LowerPriceInputDelay() => Task.Delay(LowerPriceClickHoldMs);
+
+    /// <summary>True while the chat input has the keyboard, i.e. anything typed goes to a channel.</summary>
+    private bool IsLowerPriceChatOpen()
+    {
+        try
+        {
+            // ChatBox.IsVisible is the chat *log* and reads true permanently; the input element is
+            // the one that only appears once Enter has focused it.
+            return GameController?.IngameState?.IngameUi?.ChatPanel?.ChatInputElement?.IsVisible == true;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private static async Task<bool> WaitForLowerPriceCondition(Func<bool> condition, int timeoutMs)
@@ -1257,7 +1689,7 @@ public partial class TradeUtils
             }
 
             if (stopwatch.ElapsedMilliseconds >= timeoutMs) return false;
-            await Task.Delay(25);
+            await Task.Delay(LowerPriceUiPollMs);
         }
     }
 
@@ -1495,8 +1927,14 @@ public partial class TradeUtils
         // Resolve the league before the interval check, not after. Prices are only meaningful for
         // one league, so a league that has since resolved has to invalidate the table immediately
         // rather than wait out the refresh interval.
-        string league = ResolveLeagueOrNull();
-        if (league == null) return; // not known yet; the API lookup is already in flight
+        //
+        // Deliberately the LENIENT resolver. Gating the whole table on an authoritative answer left
+        // the value display dead whenever the character's league couldn't be confirmed — no
+        // POESESSID, at the login screen, mid-loading-screen. The display is read-only, so a
+        // best-guess league is fine there as long as it says which league it used. Repricing still
+        // demands the authoritative answer and refuses without it; see IsLowerPriceRateTableFresh.
+        string league = ResolveLeague();
+        if (string.IsNullOrWhiteSpace(league)) return;
 
         var leagueChanged = !string.Equals(league, _lowerPriceRatesLeague, StringComparison.OrdinalIgnoreCase);
 
@@ -1693,7 +2131,7 @@ public partial class TradeUtils
                 displayText += $"\nTotal in Chaos: {scanned.ChaosTotal:N0}\n";
                 displayText += divineInChaos > 0
                     ? $"Total in Divine: {scanned.ChaosTotal / divineInChaos:F2}"
-                    : "Total in Divine: rates unavailable";
+                    : "Total in Divine: rates unavailable" + LowerPriceRatesLeagueLabel();
 
                 if (scanned.UnpricedItems > 0)
                     displayText += $"\n({scanned.UnpricedItems} item(s) in an unpriced currency)";
@@ -1716,7 +2154,7 @@ public partial class TradeUtils
                 displayText += $"\nTotal in Chaos: {itemValues.TotalInChaos:N0}\n";
                 displayText += itemValues.DivineRateKnown
                     ? $"Total in Divine: {itemValues.TotalInDivine:F2}"
-                    : "Total in Divine: rates unavailable";
+                    : "Total in Divine: rates unavailable" + LowerPriceRatesLeagueLabel();
 
                 if (itemValues.UnpricedItems > 0)
                     displayText += $"\n({itemValues.UnpricedItems} item(s) in an unpriced currency)";
@@ -1872,6 +2310,31 @@ public partial class TradeUtils
             summary.TotalInDivine = summary.TotalInChaos / divineInChaos;
 
         return summary;
+    }
+
+    /// <summary>
+    /// Says which league the loaded rates belong to, and flags it when that isn't the league being
+    /// played. Without this the totals look authoritative no matter which league they came from —
+    /// which is exactly how a Divine got valued at 829c instead of 174c.
+    /// </summary>
+    private string LowerPriceRatesLeagueLabel()
+    {
+        var rateLeague = _lowerPriceRatesLeague;
+        if (string.IsNullOrWhiteSpace(rateLeague))
+            return "\n(no currency rates loaded yet)";
+
+        var actual = ResolveLeagueOrNull();
+        if (actual == null)
+            return $"\n⚠️ rates: {rateLeague} — league UNCONFIRMED, step down disabled" +
+                   "\n   set League Override in settings to fix";
+
+        if (!string.Equals(actual, rateLeague, StringComparison.OrdinalIgnoreCase))
+            return $"\n⚠️ rates are {rateLeague} but you're in {actual} — step down disabled";
+
+        // Rates match the league, so the only thing left that can block a step down is their age.
+        return IsLowerPriceRateTableFresh(out var staleReason)
+            ? $"\n(rates: {rateLeague})"
+            : $"\n⚠️ step down disabled — {staleReason}";
     }
 
     /// <summary>Chaos value of one unit of <paramref name="currencyName"/>, or 0 if unknown.</summary>
