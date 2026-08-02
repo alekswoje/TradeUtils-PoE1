@@ -244,6 +244,9 @@ public partial class TradeUtils
                 // Second button, immediately to the right: same reprice, every tab.
                 var allTabsRect = new RectangleF(buttonPos.X + buttonSize + 6, buttonPos.Y, buttonSize, buttonSize);
 
+                // Third: value every tab. Read-only - it only hovers, never right-clicks.
+                var valueScanRect = new RectangleF(buttonPos.X + 2 * (buttonSize + 6), buttonPos.Y, buttonSize, buttonSize);
+
                 // Debug button rendering on first render
                 if (_lowerPriceButtonRenderCount < 3)
                 {
@@ -306,13 +309,28 @@ public partial class TradeUtils
                     LogError($"LowerPrice DEBUG: Failed to draw all-tabs button: {ex.Message}");
                 }
 
+                // Value-scan button, drawn green so it reads as the harmless one.
+                try
+                {
+                    Graphics.DrawBox(valueScanRect, new SharpDX.Color(50, 130, 80, 220));
+                    Graphics.DrawFrame(valueScanRect, new SharpDX.Color(255, 255, 255, 255), 2);
+                    Graphics.DrawText("VAL", new Vector2(valueScanRect.X + 5, valueScanRect.Y + 12),
+                                      new SharpDX.Color(255, 255, 255, 255));
+                }
+                catch (Exception ex)
+                {
+                    LogError($"LowerPrice DEBUG: Failed to draw value-scan button: {ex.Message}");
+                }
+
                 // Check for button press or manual trigger
                 var buttonPressed = IsLowerPriceButtonPressed(buttonRect);
                 var allTabsPressed = IsLowerPriceButtonPressed(allTabsRect);
+                var valueScanPressed = IsLowerPriceButtonPressed(valueScanRect);
 
-                if (buttonPressed || allTabsPressed || _lowerPriceManualRepriceTriggered)
+                if (buttonPressed || allTabsPressed || valueScanPressed || _lowerPriceManualRepriceTriggered)
                 {
                     var sweepAllTabs = allTabsPressed;
+                    var valueScan = valueScanPressed;
                     LogMessage($"LowerPrice DEBUG: Button pressed={buttonPressed}, AllTabs={allTabsPressed}, ManualTrigger={_lowerPriceManualRepriceTriggered}");
                     _lowerPriceManualRepriceTriggered = false; // Reset manual trigger
 
@@ -333,7 +351,9 @@ public partial class TradeUtils
                                     await Task.Delay(10);
                                 }
 
-                                if (sweepAllTabs)
+                                if (valueScan)
+                                    await ScanAllLowerPriceShopTabValues();
+                                else if (sweepAllTabs)
                                     await RepriceAllLowerPriceTabs();
                                 else
                                     await UpdateLowerPriceAllItemPrices(offlineMerchantPanel);
@@ -514,13 +534,13 @@ public partial class TradeUtils
                     await TaskUtils.NextFrame();
                     await Task.Delay(LowerPriceStepDelayMs);
 
-                    // Check if item is locked before processing
+                    // The item is hovered by now, so its tooltip is up and carries the padlock notice
+                    // if there is one. Reading it here costs nothing and skips straight to the next
+                    // item - no right-click, no waiting on a dialog that was never going to open.
                     if (IsLowerPriceItemLocked(item))
                     {
-                        LogMessage($"LowerPrice DEBUG: Item {processedCount} - Skipping (locked)");
+                        LogMessage($"LowerPrice DEBUG: Item {processedCount} - Skipping (locked: priced too recently)");
                         skippedLocked++;
-                        await TaskUtils.NextFrame();
-                        await Task.Delay(LowerPriceStepDelayMs);
                         continue;
                     }
 
@@ -1012,6 +1032,322 @@ public partial class TradeUtils
 
         LogMessage($"=== LowerPrice: all-tabs sweep finished - {swept} tab(s) repriced" +
                    (unreachable > 0 ? $", {unreachable} unreachable" : "") + " ===");
+    }
+
+    // ===== Valuing every shop tab =====
+    //
+    // Item prices only exist on hover: the client doesn't build a tooltip until the cursor is on
+    // the item, so there is no way to read a tab's worth of prices without walking the mouse over
+    // it. This is that walk, across every shop tab, and it is strictly read-only - it never
+    // right-clicks and never opens the price dialog, so it cannot change a listing.
+
+    /// <summary>Totals from the last full shop scan. Swapped in whole, never mutated in place,
+    /// because the render thread reads it while the scan is running.</summary>
+    private sealed class LowerPriceShopScan
+    {
+        public DateTime CompletedAt;
+        public bool Cancelled;
+        public int TabsScanned;
+        public int TabsTotal;
+        public int ItemsPriced;
+        public int ItemsSeen;
+        public int UnpricedItems;
+        public int MissedItems;     // hovered but never produced a price
+        public int UnstableTabs;    // rebuilt under us repeatedly; totals may be short
+        public decimal ChaosTotal;
+        public string RatesLeague;
+        public Dictionary<string, decimal> OrbTotals = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
+        public List<KeyValuePair<string, decimal>> PerTab = new List<KeyValuePair<string, decimal>>();
+    }
+
+    private volatile LowerPriceShopScan _lowerPriceShopScan;
+    private volatile string _lowerPriceShopScanProgress;
+
+    /// <summary>Live item list for the open shop tab, re-read rather than cached.</summary>
+    private IList<NormalInventoryItem> CurrentLowerPriceTabItems()
+    {
+        try
+        {
+            return GameController?.IngameState?.IngameUi?.OfflineMerchantPanel?.VisibleStash?.VisibleInventoryItems;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>Hovers one item and waits for its tooltip to carry a price.</summary>
+    private async Task<(bool Read, int Price, string Orb)> HoverReadLowerPricePrice(
+        NormalInventoryItem item, Vector2 windowTopLeft, int timeoutMs)
+    {
+        var itemRect = item.GetClientRectCache;
+        if (itemRect.Width <= 0 || itemRect.Height <= 0) return (false, 0, null);
+
+        Utility.Mouse.moveMouse(new Vector2(windowTopLeft.X + itemRect.TopLeft.X + 5,
+                                            windowTopLeft.Y + itemRect.TopLeft.Y + 5));
+
+        // Poll rather than sleep a fixed amount: most tooltips are up within a frame or two, and a
+        // whole shop is a lot of items to pay a worst-case wait on.
+        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+        while (stopwatch.ElapsedMilliseconds < timeoutMs)
+        {
+            if (TryReadLowerPriceTooltipPrice(item.Tooltip, out var price, out var orbType))
+                return (true, price, orbType);
+
+            await Task.Delay(LowerPriceUiPollMs);
+        }
+
+        return (false, 0, null);
+    }
+
+    /// <summary>
+    /// Values the open tab. Everything here exists because the panel rebuilds its item list out
+    /// from under you - a lock expiring, or an item selling, is enough - and every reference taken
+    /// before that rebuild then points at an address with no tooltip behind it. Reading those
+    /// silently yields nothing, so items just vanish from the total.
+    ///
+    /// So: the list is re-read on every single item rather than enumerated once, a changed item
+    /// count abandons the attempt and restarts the tab from scratch, and anything that didn't
+    /// produce a price gets a second pass with a longer wait before it's given up on.
+    /// </summary>
+    private async Task<bool> ScanCurrentLowerPriceTabValues(LowerPriceShopScan scan, string tabName)
+    {
+        const int maxAttempts = 3;
+
+        // GetWindowRectangleTimeCache.TopLeft is a SharpDX vector; the rest of this file works in
+        // System.Numerics, so convert once here rather than at each call.
+        var window = GameController.Window.GetWindowRectangleTimeCache.TopLeft;
+        var windowTopLeft = new Vector2(window.X, window.Y);
+
+        for (var attempt = 1; attempt <= maxAttempts; attempt++)
+        {
+            var startCount = CurrentLowerPriceTabItems()?.Count ?? 0;
+            if (startCount == 0)
+            {
+                scan.PerTab.Add(new KeyValuePair<string, decimal>(tabName, 0m));
+                return true;
+            }
+
+            // Tallied locally so a restart discards a half-finished pass instead of double-counting.
+            var orbTotals = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
+            var tabChaos = 0m;
+            var priced = 0;
+            var unpriced = 0;
+            var missed = new List<int>();
+            var rebuilt = false;
+
+            for (var i = 0; i < startCount; i++)
+            {
+                if (LowerPriceMoveCancellationRequested)
+                {
+                    scan.Cancelled = true;
+                    return false;
+                }
+
+                var list = CurrentLowerPriceTabItems();
+                if (list == null || list.Count != startCount)
+                {
+                    rebuilt = true;
+                    break;
+                }
+
+                var result = await HoverReadLowerPricePrice(list[i], windowTopLeft, 300);
+                if (!result.Read)
+                {
+                    missed.Add(i);
+                    continue;
+                }
+
+                priced++;
+                var orb = result.Orb.Trim();
+                orbTotals.TryGetValue(orb, out var soFar);
+                orbTotals[orb] = soFar + result.Price;
+
+                var chaosEach = GetLowerPriceChaosValue(orb);
+                if (chaosEach > 0) tabChaos += result.Price * chaosEach;
+                else unpriced++;
+            }
+
+            if (rebuilt && attempt < maxAttempts)
+            {
+                LogMessage($"LowerPrice: '{tabName}' changed while being valued (an item locked or sold); rescanning it.");
+                await Task.Delay(250);
+                continue;
+            }
+
+            // Second pass over anything that didn't answer, with a longer wait. A miss is usually
+            // just a tooltip that hadn't built yet, not an item without a price.
+            if (missed.Count > 0 && !rebuilt)
+            {
+                foreach (var index in missed.ToArray())
+                {
+                    if (LowerPriceMoveCancellationRequested)
+                    {
+                        scan.Cancelled = true;
+                        return false;
+                    }
+
+                    var list = CurrentLowerPriceTabItems();
+                    if (list == null || list.Count != startCount || index >= list.Count) break;
+
+                    var retry = await HoverReadLowerPricePrice(list[index], windowTopLeft, 700);
+                    if (!retry.Read) continue;
+
+                    missed.Remove(index);
+                    priced++;
+                    var orb = retry.Orb.Trim();
+                    orbTotals.TryGetValue(orb, out var soFar);
+                    orbTotals[orb] = soFar + retry.Price;
+
+                    var chaosEach = GetLowerPriceChaosValue(orb);
+                    if (chaosEach > 0) tabChaos += retry.Price * chaosEach;
+                    else unpriced++;
+                }
+            }
+
+            // Commit this attempt.
+            scan.ItemsSeen += startCount;
+            scan.ItemsPriced += priced;
+            scan.UnpricedItems += unpriced;
+            scan.MissedItems += missed.Count;
+            scan.ChaosTotal += tabChaos;
+            foreach (var kv in orbTotals)
+            {
+                scan.OrbTotals.TryGetValue(kv.Key, out var soFar);
+                scan.OrbTotals[kv.Key] = soFar + kv.Value;
+            }
+
+            scan.PerTab.Add(new KeyValuePair<string, decimal>(tabName, tabChaos));
+
+            if (rebuilt)
+            {
+                scan.UnstableTabs++;
+                LogError($"LowerPrice: '{tabName}' kept changing while being valued; its total may be incomplete.");
+            }
+            else if (missed.Count > 0)
+            {
+                LogError($"LowerPrice: '{tabName}' - {missed.Count} item(s) never showed a price and aren't in the total.");
+            }
+
+            LogMessage($"LowerPrice: tab '{tabName}' = {tabChaos:N0} chaos ({priced}/{startCount} priced)");
+            return true;
+        }
+
+        return true;
+    }
+
+    private async Task ScanAllLowerPriceShopTabValues()
+    {
+        var panel = GameController?.IngameState?.IngameUi?.OfflineMerchantPanel;
+        if (panel?.IsVisible != true)
+        {
+            LogError("LowerPrice: the merchant panel isn't open, so there's nothing to value.");
+            return;
+        }
+
+        var grids = GetLowerPriceShopGrids();
+        var tabCount = grids == null ? 0 : (int)grids.ChildCount;
+        if (tabCount == 0)
+        {
+            LogError("LowerPrice: couldn't find the shop tab strip, so only the open tab can be valued.");
+            return;
+        }
+
+        var startingTab = CurrentLowerPriceShopTab(grids);
+        var scan = new LowerPriceShopScan { TabsTotal = tabCount, RatesLeague = _lowerPriceRatesLeague };
+
+        LogMessage($"=== LowerPrice: valuing all {tabCount} shop tabs ===");
+
+        for (var tab = 0; tab < tabCount; tab++)
+        {
+            if (LowerPriceMoveCancellationRequested)
+            {
+                scan.Cancelled = true;
+                LogMessage("LowerPrice: value scan cancelled (right mouse button).");
+                break;
+            }
+
+            if (GameController?.IngameState?.IngameUi?.OfflineMerchantPanel?.IsVisible != true)
+            {
+                scan.Cancelled = true;
+                LogMessage("LowerPrice: merchant panel closed, ending the value scan.");
+                break;
+            }
+
+            _lowerPriceShopScanProgress = $"scanning tab {tab + 1}/{tabCount}...";
+
+            if (!await SelectLowerPriceShopTab(tab))
+            {
+                LogError($"LowerPrice: couldn't switch to shop tab {tab + 1}/{tabCount} while valuing; skipping it.");
+                continue;
+            }
+
+            var tabName = LowerPriceShopTabName(tab);
+
+            if (!await ScanCurrentLowerPriceTabValues(scan, tabName)) break;
+            scan.TabsScanned++;
+
+            if (scan.Cancelled) break;
+        }
+
+        if (startingTab >= 0) await SelectLowerPriceShopTab(startingTab);
+
+        scan.CompletedAt = DateTime.Now;
+        _lowerPriceShopScan = scan;
+        _lowerPriceShopScanProgress = null;
+
+        LogMessage($"=== LowerPrice: value scan finished - {scan.TabsScanned}/{tabCount} tabs, " +
+                   $"{scan.ItemsPriced} priced items, {scan.ChaosTotal:N0} chaos total ===");
+    }
+
+    /// <summary>The all-tabs totals block appended under the current tab's figures.</summary>
+    private string LowerPriceShopScanSummary()
+    {
+        var progress = _lowerPriceShopScanProgress;
+        if (progress != null) return $"\n\nAll tabs: {progress}";
+
+        var scan = _lowerPriceShopScan;
+        if (scan == null) return "";
+
+        var age = DateTime.Now - scan.CompletedAt;
+        var when = age.TotalMinutes < 1 ? "just now" : $"{age.TotalMinutes:F0}m ago";
+
+        var text = $"\n\n=== ALL TABS ({scan.TabsScanned}/{scan.TabsTotal}) - {when} ===\n";
+        text += $"Items priced: {scan.ItemsPriced}/{scan.ItemsSeen}\n";
+
+        foreach (var orb in scan.OrbTotals
+                     .OrderByDescending(o => GetLowerPriceChaosValue(o.Key) * o.Value)
+                     .ThenBy(o => o.Key))
+        {
+            text += $"{orb.Key}: {orb.Value:N0}\n";
+        }
+
+        text += $"Total in Chaos: {scan.ChaosTotal:N0}\n";
+
+        var divine = GetLowerPriceChaosValue("Divine Orb");
+        text += divine > 0
+            ? $"Total in Divine: {scan.ChaosTotal / divine:F2}"
+            : "Total in Divine: rates unavailable";
+
+        if (scan.UnpricedItems > 0)
+            text += $"\n({scan.UnpricedItems} item(s) in an unpriced currency)";
+
+        // A silently-short total is worse than no total, so say when items were missed.
+        if (scan.MissedItems > 0)
+            text += $"\n⚠️ {scan.MissedItems} item(s) never showed a price - NOT counted";
+
+        if (scan.UnstableTabs > 0)
+            text += $"\n⚠️ {scan.UnstableTabs} tab(s) kept changing mid-scan - may be short";
+
+        if (scan.Cancelled)
+            text += "\n⚠️ scan was cancelled - totals are partial";
+
+        // Rates can move between the scan and now, and the totals were computed against the old ones.
+        if (!string.IsNullOrWhiteSpace(scan.RatesLeague) &&
+            !string.Equals(scan.RatesLeague, _lowerPriceRatesLeague, StringComparison.OrdinalIgnoreCase))
+            text += $"\n⚠️ scanned against {scan.RatesLeague} rates";
+
+        return text;
     }
 
     /// <summary>
@@ -1770,60 +2106,51 @@ public partial class TradeUtils
         }
     }
 
-    private bool IsLowerPriceItemLocked(dynamic item)
-    {
-        try
-        {
-            // Check all children of the item for locked texture
-            if (item?.Children != null)
-            {
-                foreach (var child in item.Children)
-                {
-                    if (IsLowerPriceElementOrChildrenLocked(child))
-                    {
-                        return true;
-                    }
-                }
-            }
-            return false;
-        }
-        catch
-        {
-            // If any error occurs, assume not locked to avoid blocking legitimate items
-            return false;
-        }
-    }
+    /// <summary>
+    /// The client draws a padlock on items it won't let you reprice, and that padlock has no
+    /// element behind it - no texture, no distinct tooltip type, nothing overlapping the cell. What
+    /// it DOES have is a line in the item's own tooltip:
+    ///
+    ///   "You assigned a price to this item recently, and cannot modify or remove the item yet."
+    ///
+    /// which is free to read, because the reprice loop is already holding that tooltip to parse the
+    /// asking price out of it. The previous implementation walked item.Children looking for a
+    /// LockedItems.dds texture; merchant item elements have no children at all, so it always
+    /// returned false and locked items were repriced anyway.
+    /// </summary>
+    private const string LowerPriceLockedNotice = "cannot modify or remove";
 
-    private bool IsLowerPriceElementOrChildrenLocked(dynamic element)
+    private static bool IsLowerPriceItemLocked(NormalInventoryItem item)
     {
-        try
+        Element tooltip = null;
+        try { tooltip = item?.Tooltip; } catch { }
+        if (tooltip == null) return false;
+
+        // Depth-first over the tooltip. The notice sits among the item's other lines, and its
+        // position shifts the asking-price row down, so don't look for it at a fixed index.
+        var stack = new Stack<Element>();
+        stack.Push(tooltip);
+        var visited = 0;
+
+        while (stack.Count > 0 && visited++ < 400)
         {
-            // Check if this element has the locked texture
-            if (!string.IsNullOrEmpty(element.TextureName) && 
-                element.TextureName.Contains("LockedItems.dds"))
-            {
+            var element = stack.Pop();
+            if (element == null) continue;
+
+            string text = null;
+            try { text = element.TextNoTags ?? element.Text; } catch { }
+
+            if (!string.IsNullOrEmpty(text) &&
+                text.IndexOf(LowerPriceLockedNotice, StringComparison.OrdinalIgnoreCase) >= 0)
                 return true;
-            }
 
-            // Recursively check children
-            if (element?.Children != null)
-            {
-                foreach (var child in element.Children)
-                {
-                    if (IsLowerPriceElementOrChildrenLocked(child))
-                    {
-                        return true;
-                    }
-                }
-            }
+            IList<Element> children = null;
+            try { children = element.Children; } catch { }
+            if (children == null) continue;
+            foreach (var child in children) stack.Push(child);
+        }
 
-            return false;
-        }
-        catch
-        {
-            // If any error occurs, assume not locked
-            return false;
-        }
+        return false;
     }
 
     private void RenderLowerPriceTimerDisplay()
@@ -2167,6 +2494,9 @@ public partial class TradeUtils
                 }
             }
 
+            // Totals from the last full-shop scan, under the current tab's figures.
+            displayText += LowerPriceShopScanSummary();
+
             // Draw black background - POE1 uses SharpDX.Color
             var textSize = Graphics.MeasureText(displayText);
             var backgroundRect = new RectangleF(pos.X - 5, pos.Y - 5, textSize.X + 10, textSize.Y + 10);
@@ -2201,11 +2531,10 @@ public partial class TradeUtils
                 
                 try
                 {
-                    // Check if item is locked before processing
-                    if (IsLowerPriceItemLocked(item))
-                    {
-                        continue;
-                    }
+                    // Locked items are deliberately NOT skipped here. They're still listed and still
+                    // worth what they're priced at, so they belong in the tab's value. The old lock
+                    // check never actually matched, so they were always counted - now that it works,
+                    // skipping them here would silently drop them out of the totals.
 
                     // Check if item has tooltip
                     var tooltip = item.Tooltip;
