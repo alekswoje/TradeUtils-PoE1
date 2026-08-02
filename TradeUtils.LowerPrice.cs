@@ -27,8 +27,10 @@ namespace TradeUtils;
 
 public partial class TradeUtils
 {
-    /// <summary>Display name the client uses for chaos, on tooltips and in the currency dropdown.</summary>
+    // Display names the client uses, on tooltips and in the currency dropdown.
     private const string ChaosOrbName = "Chaos Orb";
+    private const string DivineOrbName = "Divine Orb";
+    private const string MirrorOrbName = "Mirror of Kalandra";
 
     // Fixed values that used to be settings. They were knobs nobody needs to turn, and the menu had
     // grown to the point where the handful that do matter were hard to find.
@@ -594,8 +596,8 @@ public partial class TradeUtils
                                                     // where an automated mistake is worth the most.
                                                     bool reprice = orbType switch
                                                     {
-                                                        "Divine Orb" => LowerPriceSettings.RepriceDivine.Value,
-                                                        "Mirror of Kalandra" => LowerPriceSettings.RepriceMirror.Value,
+                                                        DivineOrbName => LowerPriceSettings.RepriceDivine.Value,
+                                                        MirrorOrbName => LowerPriceSettings.RepriceMirror.Value,
                                                         _ => !string.IsNullOrWhiteSpace(orbType),
                                                     };
 
@@ -1324,7 +1326,7 @@ public partial class TradeUtils
 
         text += $"Total in Chaos: {scan.ChaosTotal:N0}\n";
 
-        var divine = GetLowerPriceChaosValue("Divine Orb");
+        var divine = GetLowerPriceChaosValue(DivineOrbName);
         text += divine > 0
             ? $"Total in Divine: {scan.ChaosTotal / divine:F2}"
             : "Total in Divine: rates unavailable";
@@ -1351,16 +1353,33 @@ public partial class TradeUtils
     }
 
     /// <summary>
-    /// The reduced price for a listing, by whichever strategy is configured.
+    /// Whether <paramref name="orbType"/> steps down by the flat amount rather than the ratio.
     ///
-    /// There used to be five per-currency "Override" toggles here, all of which forced flat
-    /// reduction despite three of them being named *UseRatio — so with the shipped defaults a
-    /// Chaos listing dropped by 1 flat while the Price Ratio slider sat there looking like it was
-    /// in charge. One strategy for every currency is both simpler and honest about what it does.
+    /// Divine and Mirror can opt in individually, because a percentage of a high-value listing is a
+    /// huge move — 10% off 38 Divine is nearly 4 Divine in a single run — while a flat 1 eases it
+    /// down. Everything else follows the global setting.
+    ///
+    /// The old build had five of these and three were named *UseRatio while forcing flat, so with
+    /// stock settings a Chaos listing dropped by a flat 1 while the Price Ratio slider sat there
+    /// looking like it was in charge. These two say what they do.
     /// </summary>
+    private bool UsesFlatLowerPriceReduction(string orbType)
+    {
+        var orb = orbType?.Trim();
+
+        if (string.Equals(orb, DivineOrbName, StringComparison.OrdinalIgnoreCase))
+            return LowerPriceSettings.DivineUseFlat.Value || LowerPriceSettings.UseFlatReduction.Value;
+
+        if (string.Equals(orb, MirrorOrbName, StringComparison.OrdinalIgnoreCase))
+            return LowerPriceSettings.MirrorUseFlat.Value || LowerPriceSettings.UseFlatReduction.Value;
+
+        return LowerPriceSettings.UseFlatReduction.Value;
+    }
+
+    /// <summary>The reduced price for a listing, by whichever strategy applies to its currency.</summary>
     private float CalculateLowerPriceNewPrice(int oldPrice, string orbType)
     {
-        return LowerPriceSettings.UseFlatReduction.Value
+        return UsesFlatLowerPriceReduction(orbType)
             ? oldPrice - LowerPriceSettings.FlatReductionAmount.Value
             : (float)Math.Floor(oldPrice * LowerPriceSettings.PriceRatio.Value);
     }
@@ -1373,8 +1392,8 @@ public partial class TradeUtils
     /// </summary>
     private static readonly string[] LowerPriceCurrencyLadder =
     {
-        "Mirror of Kalandra",
-        "Divine Orb",
+        MirrorOrbName,
+        DivineOrbName,
         ChaosOrbName,
     };
 
@@ -1449,9 +1468,10 @@ public partial class TradeUtils
 
         var equivalent = oldPrice * sourceChaos / targetChaos;
 
-        // Reduce by whatever rule the target currency uses, so a stepped-down listing and one that
-        // was always priced in that currency move by the same amount from here on.
-        var reduced = LowerPriceSettings.UseFlatReduction.Value
+        // Reduce by whatever rule the TARGET currency uses, so a stepped-down listing and one that
+        // was always priced in that currency move by the same amount from here on. A Mirror stepping
+        // onto Divine therefore picks up the Divine rule, not the Mirror one.
+        var reduced = UsesFlatLowerPriceReduction(targetOrb)
             ? equivalent - LowerPriceSettings.FlatReductionAmount.Value
             : Math.Floor(equivalent * (decimal)LowerPriceSettings.PriceRatio.Value);
 
@@ -1553,8 +1573,8 @@ public partial class TradeUtils
         new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase)
         {
             [ChaosOrbName] = 0,
-            ["Divine Orb"] = 1,
-            ["Mirror of Kalandra"] = 5,
+            [DivineOrbName] = 1,
+            [MirrorOrbName] = 5,
         };
 
     /// <summary>
@@ -2395,7 +2415,7 @@ public partial class TradeUtils
             _lowerPriceLastCurrencyUpdate = DateTime.Now;
             _lowerPriceRatesNextAttempt = DateTime.MinValue;
             LogMessage($"LowerPrice: loaded {parsed.Count} currency rates for league '{league}' " +
-                       $"(1 Divine = {GetLowerPriceChaosValue("Divine Orb"):F1} chaos).");
+                       $"(1 Divine = {GetLowerPriceChaosValue(DivineOrbName):F1} chaos).");
         }
         catch (Exception ex)
         {
@@ -2441,7 +2461,7 @@ public partial class TradeUtils
             // hover the item — so the in-game path can only ever see what you've already touched.
             // The API scan has every price whether or not you hovered anything.
             var scanned = GetScannedValueForOpenTab();
-            var divineInChaos = GetLowerPriceChaosValue("Divine Orb");
+            var divineInChaos = GetLowerPriceChaosValue(DivineOrbName);
 
             string displayText;
             if (scanned != null)
@@ -2633,7 +2653,7 @@ public partial class TradeUtils
         summary.ItemsWithPricing = itemsWithPricing;
 
         // Convert the chaos total once, at the end, rather than per item.
-        var divineInChaos = GetLowerPriceChaosValue("Divine Orb");
+        var divineInChaos = GetLowerPriceChaosValue(DivineOrbName);
         summary.DivineRateKnown = divineInChaos > 0;
         if (summary.DivineRateKnown)
             summary.TotalInDivine = summary.TotalInChaos / divineInChaos;

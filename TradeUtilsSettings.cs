@@ -553,6 +553,16 @@ public class LowerPriceSubSettings
     [Menu("Flat Reduction Amount", "Amount subtracted each run when Use Flat Reduction is on")]
     public RangeNode<int> FlatReductionAmount { get; set; } = new RangeNode<int>(1, 1, 100);
 
+    // Per-currency opt-in to flat reduction, for the two tiers where a percentage is a huge step:
+    // 10% off 38 Divine is nearly 4 Divine gone in one run, where a flat 1 eases it down. Only these
+    // two exist on purpose - the old build had five of these and three were named *UseRatio while
+    // forcing flat, which is how a Chaos listing quietly ignored the Price Ratio slider entirely.
+    [Menu("Divine: always flat", "Divine-priced listings drop by the Flat Reduction Amount instead of the Price Ratio, whatever the global setting says.")]
+    public ToggleNode DivineUseFlat { get; set; } = new ToggleNode(true);
+
+    [Menu("Mirror: always flat", "Mirror-priced listings drop by the Flat Reduction Amount instead of the Price Ratio, whatever the global setting says.")]
+    public ToggleNode MirrorUseFlat { get; set; } = new ToggleNode(true);
+
     // ===== AT THE BOTTOM OF THE RANGE =====
     [Menu("Step Down Currency", "Once a price gets low, every further cut is enormous — 3 Divine to 2 is 33%, 2 to 1 is 50%, and 1 can't be lowered at all. With this on, a listing at or below the threshold is relisted in the next cheaper currency at the poe.ninja equivalent (Mirror to Divine to Chaos), so it keeps stepping down in fine increments instead. Needs poe.ninja rates.")]
     public ToggleNode StepDownCurrency { get; set; } = new ToggleNode(false);
