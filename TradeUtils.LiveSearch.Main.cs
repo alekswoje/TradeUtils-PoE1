@@ -181,6 +181,7 @@ public partial class TradeUtils : BaseSettingsPlugin<TradeUtilsSettings>
     partial void RenderStashValue();
     partial void RenderBulkBuy();
     partial void RenderCurrencyExchange();
+    partial void RenderExchangeCollect();
     partial void AreaChangeLiveSearch(AreaInstance area);
     partial void AreaChangeLowerPrice(AreaInstance area);
     partial void AreaChangeBulkBuy(AreaInstance area);

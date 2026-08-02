@@ -59,6 +59,7 @@ public partial class TradeUtils
         if (Settings.CurrencyExchange.Enable.Value)
         {
             RenderCurrencyExchange();
+            RenderExchangeCollect();
         }
     }
     
