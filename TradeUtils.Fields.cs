@@ -106,7 +106,25 @@ public partial class TradeUtils
     
     // When true, Ctrl key is held down for BulkBuy operations (to avoid repeated press/release)
     private bool _bulkBuyCtrlHeld = false;
-    
+
+    // Whether the hideout we are standing in is the player's OWN.
+    //
+    // AreaInstance.IsHideout is true for anyone's hideout, including a seller's — and after buying
+    // something that is exactly where the character is standing. Skipping the trip home on the
+    // strength of "we're in a hideout" sends the stash routine hunting for a stash in a stranger's
+    // hideout, which is what happened on 2026-08-09.
+    //
+    // There is nothing in the area data that names the owner, so this is tracked rather than
+    // detected: it is only ever set true after the plugin's own /hideout completes, and reset on
+    // every zone change. Unknown means "travel", which is the safe default.
+    private volatile bool _inOwnHideout = false;
+
+    // BulkBuy drives the mouse itself, verifying each item before it clicks. LiveSearch's tick has
+    // its own "purchase window opened -> move mouse and auto-buy" path, and with both running the
+    // two race for the cursor: LiveSearch can fire a click on a slot BulkBuy has not verified yet.
+    // While this is set, that path stands down and BulkBuy owns the input.
+    private volatile bool _bulkBuyOwnsInput = false;
+
     // LiveSearch pause state (pauses processing but keeps websockets open)
     private bool _liveSearchPaused = false;
     
@@ -118,7 +136,38 @@ public partial class TradeUtils
     private bool _liveSearchPausedForStash = false;
     
     // ==================== HELPER METHODS ====================
-    
+
+    /// <summary>
+    /// Gate in front of every synthesised click or keystroke: refuses unless Path of Exile is the
+    /// focused window.
+    ///
+    /// <c>mouse_event</c>, <c>keybd_event</c> and <c>Cursor.Position</c> are system-wide, not scoped
+    /// to the game. With the game unfocused — during a loading screen, after an alt-tab, or when the
+    /// HUD starts while the user is in another app — every click this plugin makes lands on whatever
+    /// happens to be in front of it: the desktop, a browser, an editor. There is no situation in
+    /// which that is wanted, and it is bad enough that it belongs in one guard rather than being
+    /// remembered at each call site.
+    ///
+    /// The foreground check is deliberately re-done at the moment of acting. Checking once at the
+    /// start of a routine and then typing and clicking for the next ten seconds is the same bug with
+    /// a smaller window.
+    /// </summary>
+    protected bool CanSendInput(string action)
+    {
+        try
+        {
+            if (GameController.Window.IsForeground()) return true;
+        }
+        catch
+        {
+            // If the window can't even be inspected, err toward doing nothing.
+        }
+
+        LogError($"🛑 Not going to {action} — Path of Exile isn't the focused window. " +
+                 "Refusing so the click doesn't land on whatever is.");
+        return false;
+    }
+
     /// <summary>
     /// Log debug messages (only if debug mode is enabled)
     /// </summary>
@@ -323,6 +372,7 @@ public partial class TradeUtils
     private const byte VK_CONTROL = 0x11;
     private const byte VK_SHIFT = 0x10;
     private const byte VK_ALT = 0x12;
+    private const byte VK_ESCAPE = 0x1B;
     
     // Key event flags
     private const uint KEYEVENTF_KEYDOWN = 0x0000;

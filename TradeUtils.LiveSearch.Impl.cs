@@ -371,7 +371,7 @@ public partial class TradeUtils
                 }
                 
                 if (areaChangePurchaseWindowVisible && !_lastPurchaseWindowVisible &&
-                    true)
+                    !_bulkBuyOwnsInput)
                 {
                     bool hasTeleportedItemLocation = _teleportedItemLocation.X != 0 || _teleportedItemLocation.Y != 0;
                     if (_allowMouseMovement && (_windowWasClosedSinceLastMovement || hasTeleportedItemLocation))
@@ -477,9 +477,11 @@ public partial class TradeUtils
                 }
             }
             
-            // Move mouse to item when window opens (if enabled and we have a location)
+            // Move mouse to item when window opens (if enabled and we have a location).
+            // Never while BulkBuy is mid-purchase: it verifies the item under the cursor before it
+            // clicks, and a click fired from here would skip that check entirely.
             if (currentPurchaseWindowVisible && !_lastPurchaseWindowVisible &&
-                true)
+                !_bulkBuyOwnsInput)
             {
                 if (!_allowMouseMovement)
                 {

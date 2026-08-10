@@ -615,6 +615,39 @@ public class BulkBuySubSettings
     [Menu("Stop on Error", "Stop bulk buying if an error occurs, instead of retrying and carrying on")]
     public ToggleNode StopOnError { get; set; } = new ToggleNode(false);
 
+    [Menu("Check the item before buying",
+        "Read the item out of the seller's stash and refuse to click unless it matches the listing " +
+        "exactly — base type, identified state, rarity, corruption, size, item level, sockets and " +
+        "stack size. Leave this on: sellers routinely list an identified and an unidentified copy " +
+        "of the same unique side by side, and the listing only records a stash coordinate.")]
+    public ToggleNode VerifyItemBeforeBuying { get; set; } = new ToggleNode(true);
+
+    [Menu("Buy multiple from the same seller",
+        "When a seller has several matching listings, buy them all in one visit instead of " +
+        "travelling back and forth. Each item is still checked individually before it is clicked, " +
+        "including that the seller's open tab is the one the listing is in.")]
+    public ToggleNode BuyMultipleFromSameSeller { get; set; } = new ToggleNode(true);
+
+    [Menu("Stop after N failures in a row",
+        "How many consecutive failed purchases to accept before giving up. Listings that simply " +
+        "sold before you arrived don't count — this counts real failures, which in practice almost " +
+        "always means running out of the currency the listings are priced in.")]
+    public RangeNode<int> StopAfterConsecutiveFailures { get; set; } = new RangeNode<int>(3, 1, 20);
+
+    // ===== PACE =====
+    // Deliberately separate from the timing preset. The preset tunes how long to wait for the
+    // client to catch up (a reliability concern); these two control how often a trade is started
+    // at all, which is what decides how hard the whisper/teleport endpoint gets hit. With no pause
+    // at all the loop teleports again the instant a purchase completes.
+    [Menu("Pause between trades: shortest (seconds)",
+        "Lower bound on the wait after finishing one listing before travelling to the next seller.")]
+    public RangeNode<int> PurchasePauseMinSeconds { get; set; } = new RangeNode<int>(5, 0, 120);
+
+    [Menu("Pause between trades: longest (seconds)",
+        "Upper bound on that wait. A value picked from the range each time, rather than one fixed " +
+        "number, keeps the run off a metronome and spreads the load on GGG's teleport endpoint.")]
+    public RangeNode<int> PurchasePauseMaxSeconds { get; set; } = new RangeNode<int>(12, 0, 300);
+
     // ===== PRESET-DRIVEN TIMING =====
     // Not settings any more — ApplyTimingPreset() writes all of these, so exposing them as sliders
     // alongside the preset that overwrites them was only ever a way to confuse people.
@@ -660,7 +693,10 @@ public class BulkBuyGroup
         Name = new TextNode("New Group");
         Enable = new ToggleNode(false);
         Searches = new List<BulkBuySearch>();
-        League = new TextNode("Keepers");
+        // Empty, not a league name. A hardcoded league is how this broke last time: it survives the
+        // league rollover in everyone's saved settings and every search then 400s as "Invalid query".
+        // Empty means "work it out from the trade link, or fall back to ResolveLeague()".
+        League = new TextNode("");
     }
 
     [Menu("Group Name")]
@@ -669,7 +705,7 @@ public class BulkBuyGroup
     [Menu("Enable Group")]
     public ToggleNode Enable { get; set; }
 
-    [Menu("Default League")]
+    [Menu("Default League", "Leave empty to use the league from each search's trade link.")]
     public TextNode League { get; set; }
 
     public List<BulkBuySearch> Searches { get; set; }
@@ -683,7 +719,10 @@ public class BulkBuySearch
         Enable = new ToggleNode(false);
         League = new TextNode("");
         SearchId = new TextNode("");
-        MaxItems = new RangeNode<int>(10, 1, 100);
+        // Floor of 0, not 1: the count is decremented as items are bought, so 0 is the legitimate
+        // "this search is finished" state rather than an impossible value.
+        MaxItems = new RangeNode<int>(10, 0, 100);
+        TradeUrl = new TextNode("");
         QueryJson = new TextNode("");
     }
 
@@ -696,14 +735,30 @@ public class BulkBuySearch
     [Menu("League")]
     public TextNode League { get; set; }
 
-    [Menu("Search ID")]
+    /// <summary>
+    /// The trade search link, pasted straight from the browser address bar. This is the normal way
+    /// to configure a search — the league and the search id both come out of the URL, and the
+    /// stored query is recovered from GGG rather than retyped.
+    /// </summary>
+    [Menu("Trade URL", "Paste the trade search link, e.g. https://www.pathofexile.com/trade/search/Allflame/kyRr67a3u5")]
+    public TextNode TradeUrl { get; set; }
+
+    [Menu("Search ID", "Filled in automatically from the Trade URL.")]
     public TextNode SearchId { get; set; }
 
-    [Menu("Max Items")]
+    /// <summary>
+    /// How many items to actually buy. Not how many listings to look at — listings that sold, that
+    /// failed their identity check, or whose seller went offline don't count against this, and the
+    /// run keeps pulling further down the search to make up the difference.
+    /// </summary>
+    [Menu("Items to buy", "How many to actually buy. Sold or rejected listings don't count towards it.")]
     public RangeNode<int> MaxItems { get; set; }
 
-    // Raw JSON query body for non-live trade searches (POST /api/trade/search/Keepers)
-    [Menu("Query JSON")]
+    /// <summary>
+    /// Advanced escape hatch: a raw POST body for /api/trade/search/{league}. Only used when
+    /// Trade URL is empty, and kept so configs written before Trade URL existed still run.
+    /// </summary>
+    [Menu("Query JSON", "Advanced. Only used when Trade URL is empty.")]
     public TextNode QueryJson { get; set; }
 }
 
@@ -792,25 +847,25 @@ public class BulkBuyGroupsRenderer
                     group.Name.Value = groupNameBuffer; // Update dynamically as they type
                 }
                 // Default League for searches in this group
-                string groupLeague = group.League?.Value ?? "Keepers";
+                string groupLeague = group.League?.Value ?? "";
                 if (ImGui.InputText($"League##bulkgroup_league{i}", ref groupLeague, 32))
                 {
                     if (group.League == null)
-                        group.League = new TextNode("Keepers");
-                    group.League.Value = string.IsNullOrWhiteSpace(groupLeague) ? "Keepers" : groupLeague;
+                        group.League = new TextNode("");
+                    group.League.Value = groupLeague;
                 }
-                HelpMarker("Default league for new BulkBuy searches in this group (e.g. Keepers). Each search can override its own league.");
+                HelpMarker("Leave empty. The league comes from each search's trade link, which is always right; " +
+                           "typing one here only matters for the advanced Query JSON path.");
                 if (ImGui.Button($"Add Search##bulkgroup{i}"))
                 {
-                    // Create a blank JSON search entry, seeded with the group's default league
-                    string newLeague = group.League?.Value ?? "Keepers";
                     group.Searches.Add(new BulkBuySearch
                     {
                         Name = new TextNode($"Search {group.Searches.Count + 1}"),
                         Enable = new ToggleNode(false),
-                        League = new TextNode(string.IsNullOrWhiteSpace(newLeague) ? "Keepers" : newLeague),
+                        League = new TextNode(group.League?.Value ?? ""),
                         SearchId = new TextNode(""),
-                        MaxItems = new RangeNode<int>(10, 1, 100),
+                        MaxItems = new RangeNode<int>(10, 0, 100),
+                        TradeUrl = new TextNode(""),
                         QueryJson = new TextNode("")
                     });
                 }
@@ -877,36 +932,80 @@ public class BulkBuyGroupsRenderer
                         search.Enable.Value = enableSearch;
                         HelpMarker("Enable or disable this search; right-click header to delete search");
 
-                        // League per search (used to choose /trade/search/{league})
-                        string leagueValue = search.League?.Value ?? group.League?.Value ?? "Keepers";
-                        if (ImGui.InputText($"League##bulksearch_league{i}{j}", ref leagueValue, 32))
+                        // The trade link is the whole configuration: it carries the league and the
+                        // search id, and the query itself is fetched back from GGG.
+                        if (search.TradeUrl == null) search.TradeUrl = new TextNode("");
+                        string tradeUrl = search.TradeUrl.Value ?? "";
+                        if (ImGui.InputText($"Trade URL##bulksearch_url{i}{j}", ref tradeUrl, 512))
                         {
-                            if (search.League == null)
-                                search.League = new TextNode("Keepers");
-                            search.League.Value = string.IsNullOrWhiteSpace(leagueValue) ? "Keepers" : leagueValue;
+                            search.TradeUrl.Value = tradeUrl;
                         }
-                        HelpMarker("League for this search (e.g. Keepers). Overrides the group's default league.");
+                        HelpMarker("Paste the trade search link from your browser, e.g.\n" +
+                                   "https://www.pathofexile.com/trade/search/Allflame/kyRr67a3u5\n\n" +
+                                   "BulkBuy reads the league and the saved search straight out of it, then buys the " +
+                                   "matching listings cheapest first.");
+
+                        // Echo back what the link parses to, so a typo is visible before the run
+                        // rather than as an HTTP 400 in the log.
+                        if (!string.IsNullOrWhiteSpace(tradeUrl))
+                        {
+                            if (TradeUtils.TryParseTradeUrl(tradeUrl, out var parsedLeague, out var parsedId))
+                            {
+                                ImGui.TextColored(new Vector4(0.0f, 0.9f, 0.4f, 1.0f),
+                                    string.IsNullOrWhiteSpace(parsedLeague)
+                                        ? $"   search {parsedId}"
+                                        : $"   league '{parsedLeague}', search {parsedId}");
+                            }
+                            else
+                            {
+                                ImGui.TextColored(new Vector4(1.0f, 0.35f, 0.35f, 1.0f),
+                                    "   not a trade search link — expected .../trade/search/<league>/<id>");
+                            }
+                        }
 
                         var maxItems = search.MaxItems.Value;
-                        if (ImGui.SliderInt($"Max Items##bulksearch{i}{j}", ref maxItems, 1, 100))
+                        if (ImGui.SliderInt($"Items to buy##bulksearch{i}{j}", ref maxItems, 0, 100))
                         {
                             search.MaxItems.Value = maxItems;
                         }
-                        HelpMarker("Maximum items to buy from this search");
-
-                        // Query JSON input (multi-line)
-                        string queryJson = search.QueryJson?.Value ?? "";
-                        if (ImGui.InputTextMultiline(
-                                $"Query JSON##bulksearch_query{i}{j}",
-                                ref queryJson,
-                                4096,
-                                new Vector2(0, ImGui.GetTextLineHeight() * 6)))
+                        if (maxItems == 0)
                         {
-                            if (search.QueryJson == null)
-                                search.QueryJson = new TextNode("");
-                            search.QueryJson.Value = queryJson;
+                            ImGui.TextColored(new Vector4(0.6f, 0.85f, 0.6f, 1.0f),
+                                "   done — everything asked for was bought. Raise this to buy more.");
                         }
-                        HelpMarker("Paste the full trade search JSON body here (as copied from the browser). League will default to 'Keepers'.");
+                        HelpMarker("How many items to actually buy from this search, cheapest first.\n\n" +
+                                   "This counts purchases, not attempts: listings that sold before you got there, " +
+                                   "that failed their identity check, or whose seller went offline don't count " +
+                                   "towards it — the run just carries on further down the search list until it has " +
+                                   "bought this many or genuinely run out of listings.");
+
+                        if (ImGui.TreeNode($"Advanced##bulksearch_adv{i}{j}"))
+                        {
+                            string leagueValue = search.League?.Value ?? "";
+                            if (ImGui.InputText($"League##bulksearch_league{i}{j}", ref leagueValue, 32))
+                            {
+                                if (search.League == null) search.League = new TextNode("");
+                                search.League.Value = leagueValue;
+                            }
+                            HelpMarker("Only used with Query JSON below. A trade link already carries its league.");
+
+                            string queryJson = search.QueryJson?.Value ?? "";
+                            if (ImGui.InputTextMultiline(
+                                    $"Query JSON##bulksearch_query{i}{j}",
+                                    ref queryJson,
+                                    4096,
+                                    new Vector2(0, ImGui.GetTextLineHeight() * 6)))
+                            {
+                                if (search.QueryJson == null)
+                                    search.QueryJson = new TextNode("");
+                                search.QueryJson.Value = queryJson;
+                            }
+                            HelpMarker("A raw POST body for /api/trade/search/{league}, as copied from the browser's " +
+                                       "network tab. Only used when Trade URL is empty — use the URL instead unless " +
+                                       "you're hand-writing a query.");
+
+                            ImGui.TreePop();
+                        }
 
                         ImGui.Unindent();
                     }
@@ -925,7 +1024,7 @@ public class BulkBuyGroupsRenderer
                 Name = new TextNode($"Group {_parent.Groups.Count + 1}"),
                 Enable = new ToggleNode(false),
                 Searches = new List<BulkBuySearch>(),
-                League = new TextNode("Keepers")
+                League = new TextNode("")
             });
         }
         HelpMarker("Add a new group to organize your bulk buy searches");

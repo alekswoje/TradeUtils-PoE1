@@ -486,6 +486,9 @@ public partial class TradeUtils
             return;
         }
 
+        // A Ctrl+click sent while the game isn't focused lands wherever the cursor happens to be.
+        if (!CanSendInput("Ctrl+click to buy")) return;
+
         try
         {
             LogMessage("🖱️ AUTO BUY: Performing Ctrl+Left Click...");
@@ -560,6 +563,8 @@ public partial class TradeUtils
     /// </summary>
     private async Task DropItemFromCursorAsync()
     {
+        if (!CanSendInput("right-click to put the item back")) return;
+
         try
         {
             mouse_event(MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, UIntPtr.Zero);

@@ -179,6 +179,8 @@ public partial class TradeUtils
     /// </summary>
     private async Task TravelToHideoutForStash()
     {
+        if (!CanSendInput("type /hideout")) return;
+
         try
         {
             // Press Enter to open chat
@@ -268,6 +270,8 @@ public partial class TradeUtils
     /// </summary>
     private async Task<bool> FindAndClickStash()
     {
+        if (!CanSendInput("click the stash")) return false;
+
         try
         {
             // Try multiple times to find the stash
@@ -395,6 +399,8 @@ public partial class TradeUtils
     /// </summary>
     private async Task MoveItemToStash(ServerInventory.InventSlotItem item)
     {
+        if (!CanSendInput("move an item into the stash")) return;
+
         try
         {
             var itemRect = item.GetClientRect();

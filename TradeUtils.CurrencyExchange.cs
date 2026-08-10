@@ -642,6 +642,8 @@ public partial class TradeUtils
     /// </summary>
     private async Task FillOfferedAmountField(int amount)
     {
+        if (!CanSendInput("fill in the offered amount")) return;
+
         try
         {
             var currencyExchangePanel = GameController.IngameState.IngameUi.CurrencyExchangePanel;
@@ -690,6 +692,8 @@ public partial class TradeUtils
     /// </summary>
     private async Task FillWantedAmountField(int amount)
     {
+        if (!CanSendInput("fill in the wanted amount")) return;
+
         try
         {
             var currencyExchangePanel = GameController.IngameState.IngameUi.CurrencyExchangePanel;
