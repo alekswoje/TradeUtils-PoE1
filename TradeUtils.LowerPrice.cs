@@ -62,6 +62,14 @@ public partial class TradeUtils
     /// </summary>
     private const int LowerPriceDialogOpenTimeoutMs = 600;
 
+    /// <summary>
+    /// How long the merchant panel is allowed to read as gone before it counts as actually closed.
+    /// Committing a price dialog blanks it for a frame or two, so every "is the panel still there?"
+    /// check has to outlast that - including the ones between tabs, which run right after the
+    /// previous tab's last commit and are therefore the most likely to catch the blink.
+    /// </summary>
+    private const int LowerPricePanelBlinkMs = 750;
+
     /// <summary>Humanised pause between UI actions, drawn fresh each time it's read.</summary>
     private int LowerPriceStepDelayMs =>
         ActionDelayWithJitterMs;
@@ -81,6 +89,29 @@ public partial class TradeUtils
     // sweep, reset when a run starts, and rendered on the value display.
     private volatile int _lowerPriceRunStepDownBlocked;
     private volatile string _lowerPriceRunStepDownReason;
+
+    // How the last all-tabs sweep ended. Same reasoning as the fields above: a sweep that quietly
+    // gave up after three tabs is indistinguishable from one that found nothing left to do, and the
+    // only place it said so was a log window that isn't kept.
+    private volatile string _lowerPriceSweepSummary;
+
+    // Why a run stopped dead, in words, so the overlay can say it. The sweep used to render
+    // "a tab reported a problem that would repeat (see the log)" - and there is no log: plugin
+    // LogError never reaches Logs\*.log, only the in-game debug window, which nobody has open when
+    // a sweep ends. So the one place the reason existed was gone by the time it mattered.
+    private volatile string _lowerPriceRunFatalReason;
+
+    // A run finished, but something on it is worth a human look. Rendered next to the blocked count.
+    private volatile string _lowerPriceRunWarning;
+
+    // The dropdown row order is fixed for the length of a run, so the first step down proves it for
+    // all of them. This was a local in UpdateLowerPriceAllItemPrices, which an all-tabs sweep calls
+    // once per tab - so "once per run" was really once per tab, paying the verification wait two
+    // dozen times and taking two dozen chances on a false alarm. Reset when a run starts.
+    private bool _lowerPriceStepDownRowOrderChecked;
+
+    // Times this run found the chat input open and closed it. Bounded, see TryCloseLowerPriceChat.
+    private int _lowerPriceChatRecoveries;
     private bool _lowerPriceWasStashVisible = false;
     private int _lowerPriceButtonRenderCount = 0;
     private bool _lowerPriceImageLoaded = false;
@@ -364,13 +395,31 @@ public partial class TradeUtils
                                 // than something left over from the last one.
                                 _lowerPriceRunStepDownBlocked = 0;
                                 _lowerPriceRunStepDownReason = null;
+                                _lowerPriceSweepSummary = null;
+                                _lowerPriceRunFatalReason = null;
+                                _lowerPriceRunWarning = null;
+                                _lowerPriceStepDownRowOrderChecked = false;
+                                _lowerPriceChatRecoveries = 0;
 
                                 if (valueScan)
+                                {
                                     await ScanAllLowerPriceShopTabValues();
+                                }
                                 else if (sweepAllTabs)
+                                {
                                     await RepriceAllLowerPriceTabs();
+                                }
                                 else
-                                    await UpdateLowerPriceAllItemPrices(offlineMerchantPanel);
+                                {
+                                    // The single-tab path had nowhere to report a hard stop: it
+                                    // returned RunFatal and the caller dropped it, so a reprice
+                                    // that refused to touch anything looked exactly like one that
+                                    // had nothing to do.
+                                    var result = await UpdateLowerPriceAllItemPrices(offlineMerchantPanel);
+                                    if (result == LowerPriceTabResult.RunFatal)
+                                        _lowerPriceSweepSummary =
+                                            $"Reprice STOPPED — {_lowerPriceRunFatalReason ?? "see the plugin log window"}.";
+                                }
                             }
                             catch (Exception ex)
                             {
@@ -433,54 +482,76 @@ public partial class TradeUtils
     }
 
     /// <summary>
-    /// Reprices every item in the tab that is currently open. Returns false when the run hit
-    /// something that should stop an all-tabs sweep too (chat opened, a wrong-currency step down),
-    /// as opposed to merely finding nothing to do.
+    /// How a single tab's reprice ended, from the point of view of a sweep that has more tabs to
+    /// get through. This used to be a bool, and everything that wasn't a clean finish collapsed into
+    /// "false" - which the sweep read as "stop". So a tab that was merely awkward (the panel blank
+    /// for a frame after a price commit, one unlucky memory read that threw) ended the whole sweep
+    /// with two dozen tabs untouched, and said so only in a log window nobody keeps open.
     /// </summary>
-    private async Task<bool> UpdateLowerPriceAllItemPrices(object offlineMerchantPanel)
+    private enum LowerPriceTabResult
+    {
+        /// <summary>Walked the tab to the end. Nothing to report.</summary>
+        Completed,
+
+        /// <summary>This tab didn't work out. The next one is unaffected, so a sweep should go on.</summary>
+        TabFailed,
+
+        /// <summary>The next tab would go the same way. A sweep must stop rather than repeat it.</summary>
+        RunFatal,
+    }
+
+    /// <summary>
+    /// Reprices every item in the tab that is currently open.
+    /// </summary>
+    private async Task<LowerPriceTabResult> UpdateLowerPriceAllItemPrices(object offlineMerchantPanel)
     {
         try
         {
             LogMessage("=== LowerPrice: Starting reprice operation ===");
-            
+
             // POE1: Use OfflineMerchantPanel for offline merchant panel
             var panel = GameController.IngameState.IngameUi.OfflineMerchantPanel;
-            
+
             if (panel == null)
             {
                 LogError("LowerPrice DEBUG: OfflineMerchantPanel is null");
-                return false;
+                return LowerPriceTabResult.TabFailed;
             }
-            
-            if (!panel.IsVisible)
+
+            // Same frame-or-two blank the item loop below already tolerates. It is at its most
+            // likely right here: a sweep enters this method moments after the previous tab
+            // committed its last price dialog. Reading IsVisible once and giving up turned that
+            // blink into "the sweep stopped".
+            if (!panel.IsVisible &&
+                !await WaitForLowerPriceCondition(() => panel.IsVisible, LowerPricePanelBlinkMs))
             {
                 LogError("LowerPrice DEBUG: OfflineMerchantPanel is not visible");
-                return false;
+                return LowerPriceTabResult.TabFailed;
             }
-            
+
             // OfflineMerchantPanel is a StashElement, so we need to access VisibleStash first
             var visibleStash = panel.VisibleStash;
             if (visibleStash == null)
             {
                 LogError("LowerPrice DEBUG: VisibleStash is null");
-                return true;
+                return LowerPriceTabResult.Completed;
             }
-            
+
             var items = visibleStash.VisibleInventoryItems;
-            
+
             if (items == null)
             {
                 LogError("LowerPrice DEBUG: VisibleInventoryItems is null");
-                return true;
+                return LowerPriceTabResult.Completed;
             }
-            
+
             var itemCount = items.Count();
             LogMessage($"LowerPrice DEBUG: Found {itemCount} items in merchant panel");
-            
+
             if (!items.Any())
             {
                 LogMessage("LowerPrice DEBUG: No items to process");
-                return true;
+                return LowerPriceTabResult.Completed;
             }
 
             int processedCount = 0;
@@ -492,13 +563,10 @@ public partial class TradeUtils
             bool stepDownVerificationFailed = false;
             bool chatWasOpen = false;
             int unverifiedStepDowns = 0;
+            int amountMismatches = 0;
             int stepDownUnavailable = 0;
             string stepDownBlockedReason = null;
 
-            // The dropdown row order can't change part-way through a run, so the first step down is
-            // the only one worth checking. Checked, not proven - if the tooltip couldn't be read the
-            // rest of the run simply goes unverified rather than paying the wait again each time.
-            bool stepDownRowOrderChecked = false;
             bool structureDumped = false;  // Only dump structure once for first item
             
             foreach (var item in items)
@@ -513,11 +581,13 @@ public partial class TradeUtils
                         break;
                     }
 
-                    // Hard stop: if the chat input is open, the next keystroke goes into a public
-                    // channel instead of a price field. Close it and abandon the run.
-                    if (IsLowerPriceChatOpen())
+                    // The chat input having the keyboard is dangerous - the next digits would go into
+                    // a public channel instead of a price field - but it is also recoverable, and
+                    // this check runs BEFORE anything is typed, so nothing has gone anywhere yet.
+                    // Escape closes it; carrying on from there beats abandoning the eighteen tabs
+                    // after this one. Only a chat input that won't close is a real hard stop.
+                    if (IsLowerPriceChatOpen() && !await TryCloseLowerPriceChat())
                     {
-                        Utility.Keyboard.KeyPress(Keys.Escape);
                         chatWasOpen = true;
                         break;
                     }
@@ -525,7 +595,7 @@ public partial class TradeUtils
                     // Committing a price dialog can blank the panel for a frame or two. Closing it
                     // for real is still the way to stop a run, so only give up once it stays gone.
                     if (!panel.IsVisible &&
-                        !await WaitForLowerPriceCondition(() => panel.IsVisible, 750))
+                        !await WaitForLowerPriceCondition(() => panel.IsVisible, LowerPricePanelBlinkMs))
                     {
                         LogMessage("LowerPrice DEBUG: Breaking - merchant panel closed");
                         break;
@@ -658,26 +728,32 @@ public partial class TradeUtils
                                                                 // check available - and it costs a full hover-rebuild wait. Since the
                                                                 // row order is fixed for the length of a run, checking the first step
                                                                 // down proves it for all of them; the rest skip straight through.
-                                                                if (!stepDownRowOrderChecked)
+                                                                if (!_lowerPriceStepDownRowOrderChecked)
                                                                 {
                                                                     // Once per run, whatever the outcome. Retrying on every item is
                                                                     // what made this crawl: an unconfirmable tooltip meant each step
                                                                     // down paid the full wait again for a check that was never going
                                                                     // to pass.
-                                                                    stepDownRowOrderChecked = true;
+                                                                    _lowerPriceStepDownRowOrderChecked = true;
 
                                                                     var verdict = await VerifyLowerPriceStepDown(
                                                                         item, position, stepPrice, targetOrb, oldPrice, orbType);
 
-                                                                    // Only a positively wrong currency means anything is broken. A
-                                                                    // tooltip that won't rebuild in time proves nothing either way.
+                                                                    // Only a wrong CURRENCY is run-fatal, because only that means the
+                                                                    // dropdown row order has moved and the next step down would land
+                                                                    // just as wrong. A wrong amount can't come from the row order -
+                                                                    // the amount field is read back before anything is committed - so
+                                                                    // it gets reported and the run goes on. A tooltip that won't
+                                                                    // rebuild in time proves nothing either way.
                                                                     if (verdict == LowerPriceStepDownVerdict.WrongCurrency)
                                                                     {
                                                                         stepDownVerificationFailed = true;
                                                                         break;
                                                                     }
 
-                                                                    if (verdict != LowerPriceStepDownVerdict.Confirmed)
+                                                                    if (verdict == LowerPriceStepDownVerdict.WrongAmount)
+                                                                        amountMismatches++;
+                                                                    else if (verdict != LowerPriceStepDownVerdict.Confirmed)
                                                                         unverifiedStepDowns++;
                                                                 }
 
@@ -870,24 +946,42 @@ public partial class TradeUtils
                            "run's step downs went unverified. They were relisted; the currency just wasn't " +
                            "confirmed. Spot-check one.");
 
+            if (amountMismatches > 0)
+                _lowerPriceRunWarning = _lowerPriceStepDownMismatch;
+
             if (chatWasOpen)
+            {
+                _lowerPriceRunFatalReason =
+                    "the chat input was open and wouldn't close, so typing a price would have gone to a channel";
                 LogError("=== LowerPrice: run STOPPED because the chat input was open. Nothing was typed into it. " +
-                         "Chat was closed for you; check the last item's price and re-run. ===");
+                         "Close chat and re-run. ===");
+            }
 
             if (stepDownVerificationFailed)
+            {
+                // The specific reading is what makes this fixable - "wrong currency" alone doesn't
+                // tell anyone which row LowerPriceCurrencyRowIndex now needs.
+                _lowerPriceRunFatalReason = _lowerPriceStepDownMismatch
+                    ?? "a step down landed on the wrong currency (the dropdown row order has moved)";
                 LogError("=== LowerPrice: run STOPPED early because a step down landed on the WRONG CURRENCY. " +
                          "The last item touched is mispriced — fix it, and fix LowerPriceCurrencyRowIndex, " +
                          "before running again. ===");
+            }
 
             // Both of these mean the next tab would go the same way, so an all-tabs sweep must stop
             // rather than repeat the mistake 20 more times.
-            return !chatWasOpen && !stepDownVerificationFailed;
+            if (chatWasOpen || stepDownVerificationFailed)
+                return LowerPriceTabResult.RunFatal;
+
+            return LowerPriceTabResult.Completed;
         }
         catch (Exception ex)
         {
-            // Log error for the entire reprice operation
+            // One tab's worth of trouble, not the run's. A stale element read throwing here says
+            // nothing about the next tab, and killing the sweep over it is how a two-dozen-tab shop
+            // came back having repriced three.
             LogError($"LowerPrice DEBUG: Error in UpdateAllItemPrices: {ex.Message}\nStackTrace: {ex.StackTrace}");
-            return false;
+            return LowerPriceTabResult.TabFailed;
         }
     }
 
@@ -1090,29 +1184,52 @@ public partial class TradeUtils
 
         var swept = 0;
         var unreachable = 0;
+        var failed = 0;
+        string stoppedBecause = null;
+        var lastTab = 0;
 
         for (var tab = 0; tab < tabCount; tab++)
         {
+            lastTab = tab + 1;
+
             if (LowerPriceMoveCancellationRequested)
             {
+                stoppedBecause = "you held the right mouse button";
                 LogMessage("LowerPrice: all-tabs sweep cancelled (right mouse button).");
                 break;
             }
 
-            if (IsLowerPriceChatOpen())
+            if (IsLowerPriceChatOpen() && !await TryCloseLowerPriceChat())
             {
-                Utility.Keyboard.KeyPress(Keys.Escape);
+                stoppedBecause = "the chat input was open and wouldn't close";
                 LogError("=== LowerPrice: all-tabs sweep STOPPED because the chat input was open. ===");
                 break;
             }
 
-            if (GameController?.IngameState?.IngameUi?.OfflineMerchantPanel?.IsVisible != true)
+            // Settle rather than sample. The previous tab has just been repriced, so the panel is
+            // at its most likely to be blank for a frame right here - and reading that blink as
+            // "closed" ended the sweep with most of the shop untouched.
+            if (!await WaitForLowerPriceCondition(
+                    () => GameController?.IngameState?.IngameUi?.OfflineMerchantPanel?.IsVisible == true,
+                    LowerPricePanelBlinkMs))
             {
+                stoppedBecause = "the merchant panel closed";
                 LogMessage("LowerPrice: merchant panel closed, ending the sweep.");
                 break;
             }
 
-            if (!await SelectLowerPriceShopTab(tab))
+            // One failed selection is usually the dropdown being clicked while the panel was still
+            // rebuilding the last tab's listings, so it's worth a second go - after letting the
+            // panel settle - before writing the tab off. Without the retry a single mistimed click
+            // silently skipped a whole tab.
+            var selected = await SelectLowerPriceShopTab(tab);
+            if (!selected)
+            {
+                await LowerPriceActionStep();
+                selected = await SelectLowerPriceShopTab(tab);
+            }
+
+            if (!selected)
             {
                 unreachable++;
                 LogError($"LowerPrice: couldn't switch to shop tab {tab + 1}/{tabCount}; skipping it.");
@@ -1122,19 +1239,45 @@ public partial class TradeUtils
             var tabName = LowerPriceShopTabName(tab);
             LogMessage($"--- LowerPrice: shop tab {tab + 1}/{tabCount} ({tabName}) ---");
 
-            swept++;
-            if (!await UpdateLowerPriceAllItemPrices(null))
+            var result = await UpdateLowerPriceAllItemPrices(null);
+            if (result == LowerPriceTabResult.RunFatal)
             {
+                // Chat that wouldn't close, or a step down that landed on the wrong currency. Both
+                // would repeat on every remaining tab. Carry the tab's own words up rather than
+                // pointing at "the log" - plugin log lines never reach Logs\*.log, only the in-game
+                // debug window, so that pointer led nowhere and the stop was unexplainable.
+                stoppedBecause = _lowerPriceRunFatalReason ?? "a tab reported a problem that would repeat";
                 LogError($"=== LowerPrice: all-tabs sweep STOPPED at shop tab {tab + 1}/{tabCount} ({tabName}). ===");
                 break;
             }
+
+            if (result == LowerPriceTabResult.TabFailed)
+            {
+                failed++;
+                LogError($"LowerPrice: shop tab {tab + 1}/{tabCount} ({tabName}) didn't finish; moving on to the next one.");
+                continue;
+            }
+
+            swept++;
         }
 
         // Put the panel back on the tab it was found on.
         if (startingTab >= 0) await SelectLowerPriceShopTab(startingTab);
 
-        LogMessage($"=== LowerPrice: all-tabs sweep finished - {swept} tab(s) repriced" +
-                   (unreachable > 0 ? $", {unreachable} unreachable" : "") + " ===");
+        var trouble = (unreachable > 0 ? $", {unreachable} unreachable" : "") +
+                      (failed > 0 ? $", {failed} didn't finish" : "");
+
+        LogMessage($"=== LowerPrice: all-tabs sweep finished - {swept} tab(s) repriced{trouble} ===");
+
+        // The overlay is the only place this survives, so say it there whenever the sweep didn't
+        // get cleanly through every tab.
+        _lowerPriceSweepSummary =
+            stoppedBecause != null
+                ? $"ALL sweep STOPPED at tab {lastTab}/{tabCount} — {stoppedBecause}." +
+                  $"\n   {swept} tab(s) repriced. Re-run to finish the rest."
+                : unreachable > 0 || failed > 0
+                    ? $"ALL sweep: {swept}/{tabCount} tabs repriced{trouble}."
+                    : null;
     }
 
     // ===== Valuing every shop tab =====
@@ -2016,9 +2159,21 @@ public partial class TradeUtils
         /// <summary>Couldn't confirm — no readable tooltip, or it still shows the old listing.</summary>
         Unverified,
 
-        /// <summary>The tooltip shows a listing nobody asked for. The dropdown row order has moved.</summary>
+        /// <summary>The tooltip settled on a currency nobody asked for. The dropdown row order has moved.</summary>
         WrongCurrency,
+
+        /// <summary>Right currency, wrong number. Worth a look, but the row order is fine, so the
+        /// rest of the run isn't doomed the way <see cref="WrongCurrency"/> is.</summary>
+        WrongAmount,
     }
+
+    /// <summary>How long to let the tooltip settle before judging a step down. Only the failure path
+    /// pays it in full; a confirmed reading returns the moment it appears.</summary>
+    private const int LowerPriceStepDownVerifyMs = 1500;
+
+    /// <summary>What the last step down actually read back, in words, when it wasn't what was asked
+    /// for. This is the sentence the overlay shows, and the one that says which row index to fix.</summary>
+    private volatile string _lowerPriceStepDownMismatch;
 
     /// <summary>
     /// Checks what a step down actually produced, by re-hovering the item and reading its tooltip.
@@ -2042,12 +2197,14 @@ public partial class TradeUtils
         Utility.Mouse.moveMouse(itemPosition);
         await LowerPriceInputDelay();
 
+        _lowerPriceStepDownMismatch = null;
+
         var sawOldListing = false;
+        var lastPrice = 0;
+        string lastOrb = null;
         var stopwatch = System.Diagnostics.Stopwatch.StartNew();
 
-        // Bounded tightly: this runs once per run, and a tooltip that hasn't rebuilt within a
-        // second isn't going to.
-        while (stopwatch.ElapsedMilliseconds < 1200)
+        while (stopwatch.ElapsedMilliseconds < LowerPriceStepDownVerifyMs)
         {
             if (TryReadLowerPriceCurrentPrice(item, out var price, out var orbType))
             {
@@ -2056,21 +2213,50 @@ public partial class TradeUtils
                 if (price == expectedAmount && string.Equals(orb, expectedOrb, StringComparison.OrdinalIgnoreCase))
                     return LowerPriceStepDownVerdict.Confirmed;
 
+                // Whatever it says, it is only evidence of the SETTLED listing if it is still what
+                // it says at the end of the window - so keep the latest and rule on that one.
+                lastPrice = price;
+                lastOrb = orb;
+
                 if (price == previousAmount && string.Equals(orb, previousOrb, StringComparison.OrdinalIgnoreCase))
-                {
-                    // Stale tooltip, not a bad price. Keep waiting for the client to catch up.
                     sawOldListing = true;
-                }
-                else
-                {
-                    LogError($"LowerPrice: step down produced {price}x {orb}, not {expectedAmount}x {expectedOrb}. " +
-                             "The client's currency row order no longer matches LowerPriceCurrencyRowIndex - fix " +
-                             "that before running again.");
-                    return LowerPriceStepDownVerdict.WrongCurrency;
-                }
             }
 
             await Task.Delay(50);
+        }
+
+        // Judged on the LAST reading rather than the first mismatching one, and that is the whole
+        // point of this shape. The client rebuilds this tooltip in pieces after a relist, so for a
+        // frame or two it hands back a mix of the two listings - the new amount against the old
+        // currency label, or the reverse. Neither matches what was asked for and neither is the old
+        // listing, so the old code called the first one of those a wrong currency and killed the
+        // entire all-tabs sweep over a listing that was in fact correct. A row order that has
+        // genuinely moved is still wrong when the window closes; a half-drawn tooltip isn't.
+        var settledOnOldListing = lastOrb != null &&
+                                  lastPrice == previousAmount &&
+                                  string.Equals(lastOrb, previousOrb, StringComparison.OrdinalIgnoreCase);
+
+        if (lastOrb != null && !settledOnOldListing)
+        {
+            if (!string.Equals(lastOrb, expectedOrb, StringComparison.OrdinalIgnoreCase))
+            {
+                _lowerPriceStepDownMismatch =
+                    $"a step down settled on {lastPrice}x {lastOrb} instead of {expectedAmount}x {expectedOrb} — " +
+                    $"the client's currency dropdown row order no longer matches LowerPriceCurrencyRowIndex";
+                LogError($"LowerPrice: {_lowerPriceStepDownMismatch}. Fix that listing and the row index before " +
+                         "running again.");
+                return LowerPriceStepDownVerdict.WrongCurrency;
+            }
+
+            // Right currency, wrong number. The row order is therefore fine, so the next step down
+            // is not doomed - and the amount was typed into the field and read back out of it before
+            // anything was committed, so a half-drawn tooltip is likelier here than a real
+            // mispricing. Say so where it can be seen and let the run finish.
+            _lowerPriceStepDownMismatch =
+                $"a step down read back as {lastPrice}x {lastOrb}, not the {expectedAmount}x that was typed and " +
+                $"confirmed in the field before committing — spot-check that listing";
+            LogError($"LowerPrice: {_lowerPriceStepDownMismatch}.");
+            return LowerPriceStepDownVerdict.WrongAmount;
         }
 
         LogMessage(sawOldListing
@@ -2215,6 +2401,53 @@ public partial class TradeUtils
         {
             return false;
         }
+    }
+
+    /// <summary>At most this many chat-input recoveries before a run gives up and stops for real.</summary>
+    private const int LowerPriceMaxChatRecoveries = 3;
+
+    /// <summary>
+    /// Closes the chat input and says whether the run can safely carry on.
+    ///
+    /// Finding chat open used to end everything - on an all-tabs sweep that meant the tabs after it
+    /// went untouched, over a condition that had already been fixed by the Escape on the line above.
+    /// The check runs before anything is typed, so nothing has gone into a channel, and once the
+    /// input is shut there is nothing left to be afraid of.
+    ///
+    /// Bounded, though, for two reasons: a run that keeps finding chat open is a run losing a race
+    /// with something else for the keyboard, and if IsLowerPriceChatOpen ever reads true permanently
+    /// this would otherwise press Escape at the merchant panel until the panel itself closed. Which
+    /// is also why the panel is re-checked afterwards.
+    /// </summary>
+    private async Task<bool> TryCloseLowerPriceChat()
+    {
+        if (++_lowerPriceChatRecoveries > LowerPriceMaxChatRecoveries)
+        {
+            LogError($"LowerPrice: the chat input has opened {_lowerPriceChatRecoveries} times this run; " +
+                     "stopping rather than pressing Escape at it again.");
+            return false;
+        }
+
+        Utility.Keyboard.KeyPress(Keys.Escape);
+        await LowerPriceActionStep();
+
+        if (IsLowerPriceChatOpen())
+        {
+            LogError("LowerPrice: the chat input stayed open after Escape; stopping before anything gets typed.");
+            return false;
+        }
+
+        // Escape closes whatever has focus. If chat had already gone by the time it landed, what it
+        // closed was the merchant panel, and there is nothing left to reprice.
+        if (GameController?.IngameState?.IngameUi?.OfflineMerchantPanel?.IsVisible != true)
+        {
+            LogError("LowerPrice: closing the chat input also closed the merchant panel; stopping.");
+            return false;
+        }
+
+        LogMessage($"LowerPrice: chat input was open - closed it and carried on " +
+                   $"({_lowerPriceChatRecoveries}/{LowerPriceMaxChatRecoveries} this run).");
+        return true;
     }
 
     private static async Task<bool> WaitForLowerPriceCondition(Func<bool> condition, int timeoutMs)
@@ -2711,6 +2944,18 @@ public partial class TradeUtils
                 displayText += $"\n\n⚠️ {blocked} item(s) NOT repriced — step down was due but" +
                                $"\n   couldn't be made: {_lowerPriceRunStepDownReason}";
             }
+
+            // Something the run finished in spite of, but that wants a human eye on one listing.
+            var warning = _lowerPriceRunWarning;
+            if (!string.IsNullOrEmpty(warning))
+                displayText += $"\n\n⚠️ {warning}";
+
+            // Same reason as above: an ALL sweep that ended early after three tabs looks exactly
+            // like one that had nothing left to do, and the log window that said otherwise is gone
+            // by the time anyone notices.
+            var sweep = _lowerPriceSweepSummary;
+            if (!string.IsNullOrEmpty(sweep))
+                displayText += $"\n\n⚠️ {sweep}";
 
             // Totals from the last full-shop scan, under the current tab's figures.
             displayText += LowerPriceShopScanSummary();
