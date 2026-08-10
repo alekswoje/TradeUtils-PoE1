@@ -1,4 +1,5 @@
 using System;
+using System.Globalization;
 using System.Collections.Generic;
 using System.Linq;
 using System.Net;
@@ -81,10 +82,62 @@ public class QuotaGuard
     /// <summary>
     /// Parse rate limit headers from API response
     /// </summary>
+    /// <summary>
+    /// The bucket a response belongs to, taken from GGG's own <c>X-Rate-Limit-Policy</c> header.
+    ///
+    /// Every trade endpoint has its own policy with wildly different allowances - search is
+    /// 5 per 10s with a 60s penalty, fetch is 12 per 4s with a 10s one - so filing them all under a
+    /// single bucket makes both numbers wrong. Naming buckets after the policy means the endpoints
+    /// separate themselves without anything here having to know what they are.
+    /// </summary>
+    /// <summary>
+    /// Presents an IP-scoped header under the Account name the parser below already understands,
+    /// so both forms are read by one code path rather than two that can drift apart.
+    /// </summary>
+    private static void CopyHeader(HttpResponseMessage response, string from, string to)
+    {
+        try
+        {
+            if (response == null || response.Headers.Contains(to)) return;
+            if (!response.Headers.TryGetValues(from, out var values)) return;
+
+            response.Headers.TryAddWithoutValidation(to, values);
+        }
+        catch
+        {
+            // A header we can't copy just means this response goes untracked.
+        }
+    }
+
+    public static string ScopeOf(HttpResponseMessage response)
+    {
+        try
+        {
+            if (response != null && response.Headers.TryGetValues("X-Rate-Limit-Policy", out var policy))
+            {
+                var name = policy.FirstOrDefault();
+                if (!string.IsNullOrWhiteSpace(name)) return name.Trim();
+            }
+        }
+        catch
+        {
+            // Fall through to the shared bucket.
+        }
+
+        return "account";
+    }
+
     public void ParseRateLimitHeaders(HttpResponseMessage response)
     {
         try
         {
+            // GGG rate-limits the trade endpoints by IP and everything else by account, sending
+            // X-Rate-Limit-Ip / -Ip-State for the former. Only the Account pair used to be read, so
+            // search and fetch contributed nothing and were then gated against whichever bucket the
+            // whisper calls had filled in - a limit that had nothing to do with them.
+            CopyHeader(response, "X-Rate-Limit-Ip", "X-Rate-Limit-Account");
+            CopyHeader(response, "X-Rate-Limit-Ip-State", "X-Rate-Limit-Account-State");
+
             // Parse X-Rate-Limit-Rules header
             if (response.Headers.TryGetValues("X-Rate-Limit-Rules", out var rulesHeader))
             {
@@ -163,7 +216,7 @@ public class QuotaGuard
                 // Apply the shortest-period rule if we found one
                 if (shortestPeriod != int.MaxValue)
                 {
-                    var scope = "account";
+                    var scope = ScopeOf(response);
                     lock (_lock)
                     {
                         if (_rateLimits.ContainsKey(scope))
@@ -196,7 +249,7 @@ public class QuotaGuard
                 var stateData = string.Join(",", stateHeader).Split(',');
                 
                 // Find the state entry that matches our tracked period (shortest period from rules)
-                var scope = "account";
+                var scope = ScopeOf(response);
                 int trackedPeriod = 0;
                 
                 lock (_lock)
@@ -280,31 +333,50 @@ public class QuotaGuard
             _logMessage($"🚨 RATE LIMITED! Got 429 response");
 
             // Force remaining to 0
+            var limitedScope = ScopeOf(response);
             lock (_lock)
             {
-                if (_rateLimits.ContainsKey("account"))
+                if (_rateLimits.ContainsKey(limitedScope))
                 {
-                    _rateLimits["account"].Remaining = 0;
+                    _rateLimits[limitedScope].Remaining = 0;
                 }
             }
 
-            // Parse Retry-After header
+            // Back off. A 429 ALWAYS waits, whatever the header looks like.
+            //
+            // This used to have a hole big enough to drive a request storm through: a Retry-After
+            // that was present but unparseable — Cloudflare sends an HTTP-date, not seconds —
+            // matched the outer `if`, failed the inner parse, and fell out of both branches without
+            // waiting at all. The caller retried immediately and the plugin hammered a service that
+            // was already telling it to stop.
+            int waitMs = 60_000;
+            string why = "no usable Retry-After";
+
             if (response.Headers.TryGetValues("Retry-After", out var retryAfterHeader))
             {
-                if (int.TryParse(retryAfterHeader.First(), out var retryAfterSeconds))
+                var raw = retryAfterHeader.FirstOrDefault()?.Trim() ?? "";
+
+                if (int.TryParse(raw, out var seconds) && seconds >= 0)
                 {
-                    var waitTime = retryAfterSeconds * 1000;
-                    _logMessage($"🚨 RATE LIMITED! Waiting {retryAfterSeconds} seconds before retry...");
-                    await Task.Delay(waitTime);
-                    return waitTime;
+                    waitMs = seconds * 1000;
+                    why = $"Retry-After {seconds}s";
+                }
+                else if (DateTimeOffset.TryParse(raw, CultureInfo.InvariantCulture,
+                             DateTimeStyles.AdjustToUniversal, out var until))
+                {
+                    // HTTP-date form, which is what a Cloudflare challenge returns.
+                    waitMs = (int)Math.Max(0, (until - DateTimeOffset.UtcNow).TotalMilliseconds);
+                    why = $"Retry-After {until:HH:mm:ss}Z";
                 }
             }
-            else
-            {
-                _logMessage("🚨 RATE LIMITED! No Retry-After header, waiting 60 seconds...");
-                await Task.Delay(60000);
-                return 60000;
-            }
+
+            // Never zero — a 429 answered instantly is the case that produced the storm — and
+            // capped so a wild value can't wedge the plugin for hours.
+            waitMs = Math.Min(Math.Max(waitMs, 5_000), 300_000);
+
+            _logMessage($"🚨 RATE LIMITED ({limitedScope}) — waiting {waitMs / 1000}s ({why}).");
+            await Task.Delay(waitMs);
+            return waitMs;
         }
 
         // Parse rate limit headers for future requests

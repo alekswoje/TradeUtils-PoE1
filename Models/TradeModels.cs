@@ -80,10 +80,18 @@ public class Item
     [JsonProperty("corrupted")] public bool Corrupted { get; set; }
     [JsonProperty("properties")] public List<Property> Properties { get; set; }
     [JsonProperty("requirements")] public List<Requirement> Requirements { get; set; }
-    [JsonProperty("runeMods")] public List<string> RuneMods { get; set; }
-    [JsonProperty("implicitMods")] public List<string> ImplicitMods { get; set; }
-    [JsonProperty("explicitMods")] public List<string> ExplicitMods { get; set; }
-    [JsonProperty("desecratedMods")] public List<string> DesecratedMods { get; set; }
+    [JsonProperty("runeMods")]
+    [JsonConverter(typeof(ModTextListConverter))]
+    public List<string> RuneMods { get; set; }
+    [JsonProperty("implicitMods")]
+    [JsonConverter(typeof(ModTextListConverter))]
+    public List<string> ImplicitMods { get; set; }
+    [JsonProperty("explicitMods")]
+    [JsonConverter(typeof(ModTextListConverter))]
+    public List<string> ExplicitMods { get; set; }
+    [JsonProperty("desecratedMods")]
+    [JsonConverter(typeof(ModTextListConverter))]
+    public List<string> DesecratedMods { get; set; }
     [JsonProperty("desecrated")] public bool Desecrated { get; set; }
     [JsonProperty("frameType")] public int FrameType { get; set; }
     [JsonProperty("socketedItems")] public List<SocketedItem> SocketedItems { get; set; }
@@ -131,7 +139,9 @@ public class SocketedItem
     [JsonProperty("identified")] public bool Identified { get; set; }
     [JsonProperty("properties")] public List<Property> Properties { get; set; }
     [JsonProperty("requirements")] public List<Requirement> Requirements { get; set; }
-    [JsonProperty("explicitMods")] public List<string> ExplicitMods { get; set; }
+    [JsonProperty("explicitMods")]
+    [JsonConverter(typeof(ModTextListConverter))]
+    public List<string> ExplicitMods { get; set; }
     [JsonProperty("descrText")] public string DescrText { get; set; }
     [JsonProperty("frameType")] public int FrameType { get; set; }
     [JsonProperty("socket")] public int Socket { get; set; }

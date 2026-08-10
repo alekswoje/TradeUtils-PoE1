@@ -6,6 +6,7 @@ using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
+using ExileCore.Shared.Nodes;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using TradeUtils.Models;
@@ -130,7 +131,10 @@ public partial class TradeUtils
             using (var response = await _httpClient.SendAsync(request, ct))
             {
                 if (_rateLimiter != null)
+                {
+                    _rateLimiter.ParseRateLimitHeaders(response);
                     await _rateLimiter.HandleRateLimitResponse(response);
+                }
 
                 string body = await response.Content.ReadAsStringAsync();
 
@@ -165,6 +169,210 @@ public partial class TradeUtils
     }
 
     /// <summary>
+    /// Confirms the POESESSID still works, by asking GGG whose account it is.
+    ///
+    /// Worth one request at the start of a run because an expired session doesn't fail loudly: the
+    /// search and fetch calls still answer 200, they just come back without hideout tokens. Every
+    /// listing then looks like an offline seller and the run reports "ran out of listings", which
+    /// sends you looking at the search instead of the session.
+    /// </summary>
+    /// <returns>The account name, or null if the session is no longer valid.</returns>
+    private async Task<string> VerifyTradeSessionAsync(string sessionId, CancellationToken ct)
+    {
+        try
+        {
+            using (var request = new HttpRequestMessage(HttpMethod.Get, "https://www.pathofexile.com/api/profile"))
+            {
+                ApplyTradeHeaders(request, null, sessionId);
+
+                using (var response = await _httpClient.SendAsync(request, ct))
+                {
+                    string body = await response.Content.ReadAsStringAsync();
+
+                    if (response.StatusCode == System.Net.HttpStatusCode.Unauthorized ||
+                        response.StatusCode == System.Net.HttpStatusCode.Forbidden)
+                        return null;
+
+                    if (!response.IsSuccessStatusCode)
+                    {
+                        // Inconclusive, so the run continues — but it goes in the transcript,
+                        // because "couldn't check" is a clue when the run then finds nothing.
+                        BulkLog($"couldn't verify the session ({(int)response.StatusCode} {response.StatusCode}); " +
+                                "carrying on, but treat a run that buys nothing as suspicious.", isError: true);
+                        return "";
+                    }
+
+                    var name = JObject.Parse(body)["name"]?.ToString();
+                    return string.IsNullOrWhiteSpace(name) ? null : name;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            LogMessage($"BulkBuy: couldn't check the session ({ex.Message}); carrying on.");
+            return "";
+        }
+    }
+
+    /// <summary>
+    /// Fills a search's filter boxes in from what its trade link actually contains.
+    ///
+    /// The filters aren't in the URL — a trade link is just an id — so this costs one request, and
+    /// it is therefore driven by a button rather than run automatically for every configured search
+    /// at startup, which is precisely the burst that gets rate limited.
+    ///
+    /// Fire-and-forget from the settings renderer; the fields update when it lands.
+    /// </summary>
+    internal void LoadSearchFiltersFromLink(BulkBuySearch search)
+    {
+        if (search == null) return;
+
+        string name = search.Name?.Value ?? "(unnamed)";
+        string url = search.TradeUrl?.Value?.Trim() ?? "";
+
+        if (!TryParseTradeUrl(url, out var urlLeague, out var searchId))
+        {
+            LogError($"BulkBuy: '{name}' — set a valid Trade URL before loading its filters.");
+            return;
+        }
+
+        string league = !string.IsNullOrWhiteSpace(urlLeague)
+            ? urlLeague
+            : (!string.IsNullOrWhiteSpace(search.League?.Value) ? search.League.Value.Trim() : ResolveLeague());
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                var sessionId = Settings.LiveSearch.SessionId?.Value ?? "";
+                var query = await ResolveSavedSearchQueryAsync(league, searchId, sessionId, CancellationToken.None);
+                if (query == null) return;
+
+                var summary = new List<string>();
+
+                var tradeFilters = ReadFilterGroup(query, "trade_filters");
+                int max = tradeFilters?["price"]?["max"]?.Value<int?>() ?? 0;
+                if (search.MaxPriceChaos != null)
+                {
+                    search.MaxPriceChaos.Value = Math.Max(0, Math.Min(1_000_000, max));
+                    summary.Add(max > 0 ? $"max price {max}c" : "no price cap");
+                }
+
+                var misc = ReadFilterGroup(query, "misc_filters");
+                summary.Add($"corrupted {ReadOptionInto(misc, "corrupted", search.CorruptedFilter)}");
+                summary.Add($"identified {ReadOptionInto(misc, "identified", search.IdentifiedFilter)}");
+
+                LogMessage($"BulkBuy: '{name}' — loaded from the link: {string.Join(", ", summary)}.");
+            }
+            catch (Exception ex)
+            {
+                LogError($"BulkBuy: couldn't load '{name}' filters from its link — {ex.Message}");
+            }
+        });
+    }
+
+    /// <summary>Reads a yes/no filter into a node and returns what it was set to.</summary>
+    private static string ReadOptionInto(JObject group, string name, ListNode node)
+    {
+        string option = group?[name]?["option"]?.ToString();
+
+        string value = option == null
+            ? BulkBuySearch.FilterAny
+            : (string.Equals(option, "true", StringComparison.OrdinalIgnoreCase)
+                ? BulkBuySearch.FilterYes
+                : BulkBuySearch.FilterNo);
+
+        if (node != null) node.Value = value;
+        return value.ToLowerInvariant();
+    }
+
+    /// <summary>Reads <c>filters.&lt;group&gt;.filters</c> without creating anything.</summary>
+    private static JObject ReadFilterGroup(JObject query, string group) =>
+        (query?["filters"] as JObject)?[group]?["filters"] as JObject;
+
+    /// <summary>
+    /// Applies the search's filter overrides to the query recovered from its trade link.
+    ///
+    /// Saves regenerating a link on the trade site every time a price moves. The shapes written here
+    /// are the ones the site itself produces — <c>filters.trade_filters.filters.price.max</c> and
+    /// <c>filters.misc_filters.filters.&lt;name&gt;.option</c> with a "true"/"false" string — so the
+    /// result is a query GGG would have built.
+    ///
+    /// Read-modify-write throughout: setting a max price must not drop a min the link already had.
+    /// </summary>
+    /// <returns>A description of what was changed, or null if the link was left alone.</returns>
+    private static string ApplySearchOverrides(JObject query, BulkBuySearch search)
+    {
+        if (query == null || search == null) return null;
+
+        var applied = new List<string>();
+
+        int maxPrice = search.MaxPriceChaos?.Value ?? 0;
+        if (maxPrice > 0)
+        {
+            var tradeFilters = EnsureFilterGroup(query, "trade_filters");
+            var price = tradeFilters["price"] as JObject ?? new JObject();
+            price["max"] = maxPrice;
+            tradeFilters["price"] = price;
+            applied.Add($"max price {maxPrice}c");
+        }
+
+        ApplyOptionOverride(query, "corrupted", search.CorruptedFilter?.Value, applied);
+        ApplyOptionOverride(query, "identified", search.IdentifiedFilter?.Value, applied);
+
+        return applied.Count == 0 ? null : string.Join(", ", applied);
+    }
+
+    /// <summary>
+    /// Writes one yes/no/any filter into <c>misc_filters</c>.
+    ///
+    /// "Any" is not the same as leaving the link alone: it actively removes the filter so both
+    /// states match, which is the only way to widen a link that already narrows one.
+    /// </summary>
+    private static void ApplyOptionOverride(JObject query, string name, string mode, List<string> applied)
+    {
+        if (string.IsNullOrWhiteSpace(mode) || mode == BulkBuySearch.FilterFromLink) return;
+
+        var misc = EnsureFilterGroup(query, "misc_filters");
+
+        if (mode == BulkBuySearch.FilterAny)
+        {
+            if (misc.Remove(name)) applied.Add($"{name}: any");
+            return;
+        }
+
+        bool wanted = mode == BulkBuySearch.FilterYes;
+        misc[name] = new JObject { ["option"] = wanted ? "true" : "false" };
+        applied.Add($"{name}: {(wanted ? "yes" : "no")}");
+    }
+
+    /// <summary>
+    /// Returns <c>filters.&lt;group&gt;.filters</c>, creating the path if the link didn't have it.
+    /// </summary>
+    private static JObject EnsureFilterGroup(JObject query, string group)
+    {
+        if (!(query["filters"] is JObject filters))
+        {
+            filters = new JObject();
+            query["filters"] = filters;
+        }
+
+        if (!(filters[group] is JObject groupObject))
+        {
+            groupObject = new JObject();
+            filters[group] = groupObject;
+        }
+
+        if (!(groupObject["filters"] is JObject inner))
+        {
+            inner = new JObject();
+            groupObject["filters"] = inner;
+        }
+
+        return inner;
+    }
+
+    /// <summary>
     /// Runs a query and returns the ordered result ids. Sorting is forced to cheapest-first unless
     /// the saved search already carries its own sort, so a run that stops early stops having bought
     /// the cheapest matches rather than an arbitrary slice.
@@ -194,7 +402,10 @@ public partial class TradeUtils
             using (var response = await _httpClient.SendAsync(request, ct))
             {
                 if (_rateLimiter != null)
+                {
+                    _rateLimiter.ParseRateLimitHeaders(response);
                     await _rateLimiter.HandleRateLimitResponse(response);
+                }
 
                 string body = await response.Content.ReadAsStringAsync();
 
@@ -238,7 +449,7 @@ public partial class TradeUtils
 
             var batch = resultIds.Skip(i).Take(TradeFetchBatchSize).ToArray();
 
-            await WaitForSearchQuotaAsync("fetch", ct);
+            await WaitForFetchQuotaAsync("fetch", ct);
 
             string url = $"https://www.pathofexile.com/api/trade/fetch/{string.Join(",", batch)}?query={Uri.EscapeDataString(queryId)}";
 
@@ -249,15 +460,35 @@ public partial class TradeUtils
                 using (var response = await _httpClient.SendAsync(request, ct))
                 {
                     if (_rateLimiter != null)
+                    {
+                        _rateLimiter.ParseRateLimitHeaders(response);
                         await _rateLimiter.HandleRateLimitResponse(response);
+                    }
 
                     string body = await response.Content.ReadAsStringAsync();
 
                     if (!response.IsSuccessStatusCode)
                     {
-                        LogError($"BulkBuy: Fetch failed for {batch.Length} listing(s) — {(int)response.StatusCode} {response.StatusCode}: {Truncate(body, 200)}");
-                        continue;
+                        // Cloudflare's challenge page, not GGG's rate limiter. It carries no
+                        // X-Rate-Limit headers and its Retry-After is an HTTP-date, so there is
+                        // nothing to pace against — the only correct response is to stop.
+                        bool challenged = body.Contains("Just a moment") || body.Contains("cf-browser-verification");
+
+                        BulkLog(challenged
+                                ? "Cloudflare is challenging our requests (HTTP 429, \"Just a moment\"). " +
+                                  "That's the site itself refusing, not GGG's rate limit — nothing can be " +
+                                  "fetched until it lets up. Give it several minutes."
+                                : $"couldn't fetch {batch.Length} listing(s) — {(int)response.StatusCode} " +
+                                  $"{response.StatusCode}: {Truncate(body, 200)}",
+                                isError: true);
+
+                        _lastFetchFailed = true;
+                        _fetchBlocked = challenged || response.StatusCode == System.Net.HttpStatusCode.TooManyRequests;
+                        return listings;
                     }
+
+                    _lastFetchFailed = false;
+                    _fetchBlocked = false;
 
                     ItemFetchResponse fetched;
                     try
@@ -266,17 +497,55 @@ public partial class TradeUtils
                     }
                     catch (Exception ex)
                     {
-                        LogError($"BulkBuy: Could not parse a fetch response — {ex.Message}");
-                        continue;
+                        // Through BulkLog and treated as a blocking failure. This went to LogError
+                        // and then `continue`d, which meant a response the plugin couldn't read
+                        // discarded ten listings per batch without leaving a trace anywhere — the
+                        // run just reported "ran out of listings" having silently thrown away
+                        // everything the search found.
+                        BulkLog($"couldn't read the fetch response — {ex.Message}. " +
+                                "The trade API's format has probably changed; the listings in this " +
+                                "batch were discarded, not skipped.", isError: true);
+
+                        _lastFetchFailed = true;
+                        _fetchBlocked = true;
+                        return listings;
                     }
 
-                    if (fetched?.Result == null) continue;
+                    int entries = fetched?.Result?.Length ?? 0;
+                    int usable = 0, blank = 0;
 
-                    foreach (var result in fetched.Result)
+                    if (fetched?.Result != null)
                     {
-                        if (result?.Listing == null || result.Item == null) continue;
-                        listings.Add(result);
-                        if (listings.Count >= maxWanted) break;
+                        foreach (var result in fetched.Result)
+                        {
+                            // The trade API returns a null entry for an id that has since
+                            // disappeared. This used to be a bare `continue` with nothing counting
+                            // it, so a batch that came back entirely blank was indistinguishable
+                            // from one that was never requested.
+                            if (result?.Listing == null || result.Item == null)
+                            {
+                                blank++;
+                                continue;
+                            }
+
+                            usable++;
+                            listings.Add(result);
+                            if (listings.Count >= maxWanted) break;
+                        }
+                    }
+
+
+                    _fetchBlankEntries += blank;
+
+                    if (usable == 0)
+                    {
+                        BulkLog($"fetched {batch.Length} listing id(s) — the API returned {entries} entr" +
+                                $"{(entries == 1 ? "y" : "ies")}, {blank} of them empty, 0 usable.",
+                                isError: true);
+                    }
+                    else
+                    {
+                        LogDebug($"BulkBuy: fetched {batch.Length} id(s) — {usable} usable, {blank} empty.");
                     }
                 }
             }
@@ -310,6 +579,18 @@ public partial class TradeUtils
 
         public int Bought;
         public int Considered;
+
+        /// <summary>
+        /// Candidates thrown away before they could be tried. Counted because a run that discards
+        /// every listing looks identical to a search that matched nothing, and the two have
+        /// completely different causes — the usual one being an expired POESESSID, since the fetch
+        /// silently omits hideout tokens when the session isn't valid.
+        /// </summary>
+        public int DroppedNoToken;
+        public int DroppedNoAccount;
+
+        /// <summary>Ids the API answered with an empty entry — the listing is gone.</summary>
+        public int BlankEntries;
 
         /// <summary>
         /// Fetched listings not yet attempted, in search order. A list rather than a queue because
@@ -508,6 +789,12 @@ public partial class TradeUtils
             return null;
         }
 
+        // Applied after the query is recovered and before it is run, so it covers both the trade
+        // link and the raw Query JSON path.
+        var overrides = ApplySearchOverrides(query, search);
+        if (overrides != null)
+            LogMessage($"BulkBuy: '{searchName}' — overriding the link with {overrides}.");
+
         var searchResponse = await RunTradeSearchAsync(league, query, sort, sessionId, ct);
         if (searchResponse?.Result == null || searchResponse.Result.Length == 0)
         {
@@ -515,8 +802,11 @@ public partial class TradeUtils
             return null;
         }
 
-        LogMessage($"BulkBuy: '{searchName}' — buying up to {target}, " +
-                   $"{searchResponse.Total} listing(s) match ({searchResponse.Result.Length} reachable, cheapest first).");
+        // In the transcript, not just the debug window: "total" and "how many ids we actually got
+        // back" are different numbers, and confusing them is how a search with 95 matches ends up
+        // with nothing to fetch.
+        BulkLog($"'{searchName}': search returned {searchResponse.Result.Length} listing id(s) " +
+                $"out of {searchResponse.Total} total; buying up to {target}.");
 
         return new SearchPlan
         {
@@ -537,9 +827,34 @@ public partial class TradeUtils
     /// same mistake as counting sold listings against it.
     /// </summary>
     /// <returns>How many buyable listings were added.</returns>
+    /// <summary>Set when a fetch came back non-OK, so the caller can stop instead of grinding on.</summary>
+    private bool _lastFetchFailed;
+
+    /// <summary>
+    /// Set when the last fetch was refused rather than merely unlucky — a 429, or Cloudflare's
+    /// challenge page. Retrying that achieves nothing except more refusals, so the run stops.
+    /// </summary>
+    internal bool _fetchBlocked;
+
+    /// <summary>Running total of empty entries the API returned, sampled per batch by the caller.</summary>
+    private int _fetchBlankEntries;
+
+
     private async Task<int> TopUpSearchPlanAsync(SearchPlan plan, string sessionId, CancellationToken ct)
     {
         int added = 0;
+        _lastFetchFailed = false;
+
+        LogDebug($"BulkBuy: topping up '{plan.Name}' — at candidate {plan.NextCandidate} of " +
+                 $"{plan.CandidateIds.Length}, {plan.Ready.Count} ready.");
+
+        if (!plan.CandidatesLeft)
+        {
+            BulkLog($"'{plan.Name}': no candidates to fetch — the search gave " +
+                    $"{plan.CandidateIds.Length} id(s) and {plan.NextCandidate} have been used.",
+                    isError: true);
+            return 0;
+        }
 
         while (added == 0 && plan.CandidatesLeft && !ct.IsCancellationRequested && _bulkBuyInProgress)
         {
@@ -550,7 +865,9 @@ public partial class TradeUtils
 
             plan.NextCandidate += batch.Length;
 
+            int blankBefore = _fetchBlankEntries;
             var listings = await FetchListingsAsync(plan.League, batch, plan.QueryId, sessionId, batch.Length, ct);
+            plan.BlankEntries += _fetchBlankEntries - blankBefore;
 
             foreach (var listing in listings)
             {
@@ -560,13 +877,15 @@ public partial class TradeUtils
                 string account = info.Account?.Name;
                 if (string.IsNullOrWhiteSpace(account))
                 {
+                    plan.DroppedNoAccount++;
                     LogDebug($"BulkBuy: ignoring listing {listing.Id} — no seller account on it.");
                     continue;
                 }
 
                 if (string.IsNullOrWhiteSpace(info.HideoutToken))
                 {
-                    LogDebug($"BulkBuy: ignoring '{DescribeItem(item)}' from {account} — seller is offline.");
+                    plan.DroppedNoToken++;
+                    LogDebug($"BulkBuy: ignoring '{DescribeItem(item)}' from {account} — no hideout token.");
                     continue;
                 }
 
@@ -588,6 +907,18 @@ public partial class TradeUtils
                 });
 
                 added++;
+            }
+
+            // A failed fetch means the request didn't happen, not that these listings were no good.
+            // Carrying on would march through the whole candidate list burning it on requests that
+            // are all failing for the same reason — which is how a rate limit turned into
+            // "ran out of listings, 0 tried" with no explanation.
+            if (_lastFetchFailed)
+            {
+                plan.NextCandidate -= batch.Length;
+                BulkLog("stopping this search's fetching — the listings weren't retrieved, so they " +
+                        "haven't been used up.", isError: true);
+                break;
             }
         }
 
@@ -634,7 +965,10 @@ public partial class TradeUtils
                 using (var response = await _httpClient.SendAsync(request, ct))
                 {
                     if (_rateLimiter != null)
+                    {
+                        _rateLimiter.ParseRateLimitHeaders(response);
                         await _rateLimiter.HandleRateLimitResponse(response);
+                    }
 
                     string body = await response.Content.ReadAsStringAsync();
 
@@ -775,17 +1109,30 @@ public partial class TradeUtils
         }
     }
 
+    /// <summary>GGG's own policy names, which are what the limiter keys its buckets on.</summary>
+    private const string SearchPolicy = "trade-search-request-limit";
+    private const string FetchPolicy = "trade-fetch-request-limit";
+
     /// <summary>
-    /// Quota gate for the read path. Search and fetch deliberately share the limiter's default
-    /// "account" bucket, as they always have here — splitting them into separate buckets would start
-    /// each one empty and let the pair burst past the shared IP budget the trade site is policed on.
+    /// Quota gate for the read path.
+    ///
+    /// Search and fetch are policed separately and very differently — 5 per 10s with a 60s penalty
+    /// against 12 per 4s with a 10s one — so they are waited on separately. Sharing one bucket meant
+    /// neither number was right: a long run's fetches were blocked by the search allowance while
+    /// nothing tracked the fetch allowance at all.
     ///
     /// Proceeds even if the wait times out: the request then gets a 429, which
     /// <c>HandleRateLimitResponse</c> accounts for properly. Blocking forever would be worse.
     /// </summary>
-    private async Task WaitForSearchQuotaAsync(string label, CancellationToken ct)
+    private async Task WaitForSearchQuotaAsync(string label, CancellationToken ct) =>
+        await WaitForPolicyQuotaAsync(SearchPolicy, label, ct);
+
+    private async Task WaitForFetchQuotaAsync(string label, CancellationToken ct) =>
+        await WaitForPolicyQuotaAsync(FetchPolicy, label, ct);
+
+    private async Task WaitForPolicyQuotaAsync(string policy, string label, CancellationToken ct)
     {
-        if (!await WaitForQuotaAsync("account", label, ct))
+        if (!await WaitForQuotaAsync(policy, label, ct))
             LogMessage($"BulkBuy: still rate limited after {MaxQuotaWaitMs / 1000}s; trying the {label} anyway.");
     }
 

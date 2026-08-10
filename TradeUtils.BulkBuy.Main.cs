@@ -77,6 +77,34 @@ public partial class TradeUtils
     /// Records a skip under a short category and returns the outcome, so every skip site is one
     /// line and none of them can forget to categorise.
     /// </summary>
+    /// <summary>
+    /// Accounts for a search that attempted nothing, naming every way a candidate can be lost.
+    ///
+    /// A search matching 95 listings and trying none of them has to explain itself — the counters
+    /// exist so the answer is read off rather than guessed at.
+    /// </summary>
+    private string DescribeWhyNothingWasBuyable(SearchPlan plan)
+    {
+        var parts = new List<string>();
+
+        if (plan.DroppedNoToken > 0) parts.Add($"{plan.DroppedNoToken} had no hideout token (seller offline)");
+        if (plan.DroppedNoAccount > 0) parts.Add($"{plan.DroppedNoAccount} had no seller account");
+        if (plan.BlankEntries > 0) parts.Add($"{plan.BlankEntries} came back empty from the API (listing gone)");
+
+        if (parts.Count == 0)
+            return "and the counters are all zero, which means the fetches returned nothing at all. " +
+                   "Check the messages above for a failed request.";
+
+        string reason = string.Join(", ", parts);
+
+        // The one cause people can act on, and the one that looks exactly like bad luck.
+        if (plan.DroppedNoToken > 0 && plan.DroppedNoToken >= plan.BlankEntries)
+            reason += ". If that's most of them, suspect the POESESSID — the trade API omits hideout " +
+                      "tokens when the session isn't valid and gives no other sign";
+
+        return reason + ".";
+    }
+
     /// <summary>Skip counts as "sold 21, item didn't match 4, tab unreadable 2".</summary>
     private string DescribeSkipBreakdown()
     {
@@ -403,6 +431,22 @@ public partial class TradeUtils
                 return;
             }
 
+            // One request, up front, so a dead session is named rather than discovered as
+            // "every listing is unbuyable" twenty requests later.
+            _bulkBuyStatus = "Checking your session";
+            var account = await VerifyTradeSessionAsync(sessionId, ct);
+            if (account == null)
+            {
+                stopReason = "POESESSID is no longer valid";
+                BulkLog("your POESESSID has stopped working — GGG won't hand out hideout tokens with it, " +
+                        "so nothing can be bought. Log in to pathofexile.com again and copy the new one.",
+                        isError: true);
+                return;
+            }
+
+            if (!string.IsNullOrEmpty(account))
+                LogMessage($"BulkBuy: signed in as {account}.");
+
             BulkLog($"=== run started: buying up to {_bulkBuyTarget} item(s) across {searches.Count} search(es), " +
                     $"pause {Settings.BulkBuy.PurchasePauseMinSeconds.Value}-{Settings.BulkBuy.PurchasePauseMaxSeconds.Value}s, " +
                     $"verify={Settings.BulkBuy.VerifyItemBeforeBuying.Value}, " +
@@ -446,6 +490,7 @@ public partial class TradeUtils
                 }
 
                 searchesRun++;
+                int emptyTopUps = 0;
 
                 // The target counts items BOUGHT. A listing that sold, failed its check or came from
                 // an offline seller costs a candidate, not a purchase — so the loop keeps pulling
@@ -458,11 +503,46 @@ public partial class TradeUtils
                         {
                             BulkLog($"'{plan.Name}': ran out of listings after buying {plan.Bought} of {plan.Target} " +
                                     $"({plan.Considered} candidate(s) tried, {plan.TotalMatched} matched the search).");
+
+                            // Say why nothing was even attempted. Without this, a search whose
+                            // listings were all discarded reads exactly like one that matched
+                            // nothing, and the usual cause — a session that no longer returns
+                            // hideout tokens — is invisible.
+                            if (plan.Considered == 0)
+                                BulkLog($"'{plan.Name}': nothing was attempted — {DescribeWhyNothingWasBuyable(plan)}",
+                                        isError: true);
+
                             break;
                         }
 
                         _bulkBuyStatus = $"Fetching more listings for {plan.Name}";
-                        if (await TopUpSearchPlanAsync(plan, sessionId, ct) == 0) continue;
+
+                        if (await TopUpSearchPlanAsync(plan, sessionId, ct) == 0)
+                        {
+                            // A refused fetch doesn't consume its candidates, which is right — but
+                            // it also means CandidatesLeft never falls, so retrying here is an
+                            // infinite loop against a server that is already saying no.
+                            if (_fetchBlocked)
+                            {
+                                stopReason = "the trade site is refusing our requests";
+                                BulkLog("stopping — the trade site is refusing requests. Wait a few " +
+                                        "minutes before running again, and raise the pause between trades.",
+                                        isError: true);
+                                halt = true;
+                                break;
+                            }
+
+                            if (++emptyTopUps >= 3)
+                            {
+                                BulkLog($"'{plan.Name}': gave up fetching after {emptyTopUps} empty attempts.",
+                                        isError: true);
+                                break;
+                            }
+
+                            continue;
+                        }
+
+                        emptyTopUps = 0;
                     }
 
                     var pending = plan.TakeNext();

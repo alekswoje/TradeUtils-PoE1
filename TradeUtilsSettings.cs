@@ -724,6 +724,12 @@ public class BulkBuySearch
         MaxItems = new RangeNode<int>(10, 0, 100);
         TradeUrl = new TextNode("");
         QueryJson = new TextNode("");
+
+        MaxPriceChaos = new RangeNode<int>(0, 0, 1_000_000);
+        CorruptedFilter = new ListNode();
+        CorruptedFilter.Value = FilterFromLink;
+        IdentifiedFilter = new ListNode();
+        IdentifiedFilter.Value = FilterFromLink;
     }
 
     [Menu("Search Name")]
@@ -760,6 +766,35 @@ public class BulkBuySearch
     /// </summary>
     [Menu("Query JSON", "Advanced. Only used when Trade URL is empty.")]
     public TextNode QueryJson { get; set; }
+
+    // ===== FILTER OVERRIDES =====
+    //
+    // Applied to the query fetched from the trade link, just before it is run. The point is to save
+    // a trip back to the trade site to regenerate a link every time a price moves — the plugin
+    // already holds the query as JSON, so nudging a couple of fields costs nothing.
+    //
+    // Everything here defaults to leaving the link exactly as it is.
+
+    /// <summary>Chaos-equivalent buyout cap. 0 leaves whatever the link specifies.</summary>
+    [Menu("Max price (chaos)", "Buyout cap in chaos equivalent. 0 uses whatever the trade link says.")]
+    public RangeNode<int> MaxPriceChaos { get; set; }
+
+    [Menu("Corrupted", "Override the link's corrupted filter.")]
+    public ListNode CorruptedFilter { get; set; }
+
+    [Menu("Identified", "Override the link's identified filter.")]
+    public ListNode IdentifiedFilter { get; set; }
+
+    /// <summary>Leave the link's own filter alone — the default for every override.</summary>
+    public const string FilterFromLink = "From link";
+
+    /// <summary>Actively clear the filter, so both states match.</summary>
+    public const string FilterAny = "Any";
+
+    public const string FilterYes = "Yes";
+    public const string FilterNo = "No";
+
+    public static readonly string[] FilterChoices = { FilterFromLink, FilterAny, FilterYes, FilterNo };
 }
 
 // ==================== BULKBUY GROUPS RENDERER ====================
@@ -792,6 +827,21 @@ public class BulkBuyGroupsRenderer
                 ImGui.EndTooltip();
             }
         }
+    }
+
+    /// <summary>
+    /// A From link / Any / Yes / No dropdown for one of the trade site's yes-no filters.
+    /// </summary>
+    private static void RenderFilterOverride(string label, ListNode node)
+    {
+        if (node == null) return;
+
+        var choices = BulkBuySearch.FilterChoices;
+        int index = Array.IndexOf(choices, node.Value ?? BulkBuySearch.FilterFromLink);
+        if (index < 0) index = 0;
+
+        if (ImGui.Combo(label, ref index, choices, choices.Length))
+            node.Value = choices[index];
     }
 
     public void Render()
@@ -978,6 +1028,61 @@ public class BulkBuyGroupsRenderer
                                    "that failed their identity check, or whose seller went offline don't count " +
                                    "towards it — the run just carries on further down the search list until it has " +
                                    "bought this many or genuinely run out of listings.");
+
+                        // Filter overrides. These are edited far more often than the link itself —
+                        // a price cap in particular moves constantly — so they sit here rather than
+                        // requiring a trip back to the trade site for a fresh URL.
+                        ImGui.Separator();
+
+                        // The filters live behind the link, not in it — a trade URL is only an id —
+                        // so they have to be fetched. One button rather than an automatic fetch per
+                        // search at startup, which is the request burst that gets rate limited.
+                        if (ImGui.Button($"Load filters from link##bulksearch_load{i}{j}"))
+                        {
+                            PluginInstance?.LoadSearchFiltersFromLink(search);
+                        }
+                        HelpMarker("Reads this link's current buyout cap, corrupted and identified settings " +
+                                   "into the boxes below, so you can see and edit them here instead of " +
+                                   "rebuilding the search on the trade site.\n\n" +
+                                   "Costs one request, so it's a button rather than automatic.");
+
+                        ImGui.SameLine();
+                        ImGui.TextDisabled("filters aren't in the URL, so they're fetched");
+
+                        if (search.MaxPriceChaos == null)
+                            search.MaxPriceChaos = new RangeNode<int>(0, 0, 1_000_000);
+
+                        int maxPrice = search.MaxPriceChaos.Value;
+                        if (ImGui.InputInt($"Max price (chaos)##bulksearch_price{i}{j}", ref maxPrice))
+                        {
+                            search.MaxPriceChaos.Value = Math.Max(0, Math.Min(1_000_000, maxPrice));
+                        }
+                        ImGui.SameLine();
+                        ImGui.TextDisabled(search.MaxPriceChaos.Value > 0 ? "(applied)" : "(from link)");
+                        HelpMarker("Buyout cap in chaos equivalent, the same box the trade site calls " +
+                                   "'Buyout Price / Chaos Orb Equivalent'.\n\n" +
+                                   "0 leaves the link's own cap alone — it does NOT mean the search has no cap. " +
+                                   "Press 'Load filters from link' to see what the link actually has.");
+
+                        // Settings saved before these existed deserialize without them.
+                        if (search.CorruptedFilter == null)
+                            search.CorruptedFilter = new ListNode { Value = BulkBuySearch.FilterFromLink };
+                        if (search.IdentifiedFilter == null)
+                            search.IdentifiedFilter = new ListNode { Value = BulkBuySearch.FilterFromLink };
+
+                        RenderFilterOverride($"Corrupted##bulksearch_corrupt{i}{j}", search.CorruptedFilter);
+                        HelpMarker("From link: leave the link's setting alone.\n" +
+                                   "Any: clear it, so corrupted and uncorrupted both match.\n" +
+                                   "Yes / No: require that state.");
+
+                        RenderFilterOverride($"Identified##bulksearch_ident{i}{j}", search.IdentifiedFilter);
+                        HelpMarker("From link: leave the link's setting alone.\n" +
+                                   "Any: clear it, so identified and unidentified both match.\n" +
+                                   "Yes / No: require that state.\n\n" +
+                                   "Worth setting deliberately — an identified and an unidentified copy of the " +
+                                   "same unique are very different purchases.");
+
+                        ImGui.Separator();
 
                         if (ImGui.TreeNode($"Advanced##bulksearch_adv{i}{j}"))
                         {

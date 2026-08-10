@@ -159,7 +159,13 @@ public partial class TradeUtils
                     ImGui.Text($"Ctrl held: {_bulkBuyCtrlHeld}");
                     ImGui.Text($"Current: {_currentBulkBuyItem?.Name ?? "none"}");
                     if (_rateLimiter != null)
-                        ImGui.Text($"Rate limit: {_rateLimiter.GetStatus()}");
+                    {
+                        // Per policy, since the buckets are keyed that way now — the old single
+                        // line read "No rate limit info" because nothing files under "account".
+                        ImGui.Text($"Search: {_rateLimiter.GetStatus("trade-search-request-limit")}");
+                        ImGui.Text($"Fetch:  {_rateLimiter.GetStatus("trade-fetch-request-limit")}");
+                        ImGui.Text($"Whisper: {_rateLimiter.GetStatus("whisper")}");
+                    }
 
                     if (ImGui.Button("Stash Now", new Vector2(100, 26)) && !_autoStashInProgress)
                         _ = StartAutoStashAsync();
